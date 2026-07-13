@@ -1,153 +1,76 @@
 #!/bin/bash
-# setup.sh — first-run setup for viam:arduino on the Arduino Uno Q.
-# Viam runs this once automatically when the module is first installed.
+# setup.sh — first-run setup for viam:arduino:uno-q on the Arduino UNO Q.
+# Viam runs this once when the module is installed.
 #
-# What this does:
-#   1. Downloads arduino-cli if not already installed.
-#   2. Installs the arduino:zephyr platform if not already installed.
-#   3. Flashes firmware/uno-q-firmware/uno-q-firmware.ino to the STM32 coprocessor via
-#      arduino-cli (requires the arduino-router to be running for JTAG access).
-#   4. Stops and permanently disables arduino-router so the viam:arduino module
-#      can claim /dev/ttyHS1 exclusively.
+# The module talks to the STM32 through the arduino-router MessagePack-RPC bridge,
+# NOT a raw serial port. Arduino removed raw-serial access to the Linux side in
+# ArduinoCore-zephyr >= 0.55.0 (see DESIGN.md). So this script:
+#   1. Ensures arduino-router is running + enabled — the module is a CLIENT of it.
+#      (The old module disabled the router; that was for the dead raw-serial path.)
+#   2. Best-effort installs arduino-cli + the arduino:zephyr core + the
+#      Arduino_RouterBridge library, and flashes the RouterBridge sketch.
+#
+# ASSUMPTION: on-device flashing via arduino-cli works and the sketch registers
+# its RPC methods on boot. Firmware may instead be flashed via Arduino App Lab;
+# if so, the flash steps below are a harmless fallback. See DESIGN.md.
 
-set -euo pipefail
+set -uo pipefail  # deliberately not -e: setup is best-effort, must never brick install
 
 log() { echo "[viam:arduino setup] $*"; }
 
-# Only run on Linux ARM64 (the Qualcomm SoC side of the Arduino Uno Q).
-if [ "$(uname -m)" != "aarch64" ] || [ "$(uname -s)" != "Linux" ]; then
-    log "Not running on Linux ARM64 — skipping Arduino Uno Q setup."
+if [ "$(uname -s)" != "Linux" ]; then
+    log "Not Linux — skipping UNO Q setup."
     exit 0
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-FIRMWARE="$SCRIPT_DIR/firmware/uno-q-firmware/uno-q-firmware.ino"
-
-# Detect the correct FQBN using arduino-cli rather than hardcoding it.
-# Board IDs vary by platform version; querying the CLI is authoritative.
-detect_fqbn() {
-    "$ARDUINO_CLI" board listall 2>/dev/null \
-        | grep -i "Uno Q\|uno.*q" \
-        | awk '{print $NF}' \
-        | grep "arduino:zephyr" \
-        | head -1
-}
-FQBN=""
-ARDUINO_CLI_INSTALL_DIR="/usr/local/bin"
-ARDUINO_CLI="$ARDUINO_CLI_INSTALL_DIR/arduino-cli"
+SKETCH_DIR="$SCRIPT_DIR/firmware/uno-q-firmware"
 
 # ---------------------------------------------------------------------------
-# Step 1: Ensure arduino-cli is installed
+# 1. arduino-router MUST be running — the module speaks RPC through it.
 # ---------------------------------------------------------------------------
-install_arduino_cli() {
-    log "arduino-cli not found — downloading for Linux ARM64..."
+log "Ensuring arduino-router is running and enabled..."
+systemctl enable arduino-router 2>/dev/null || true
+systemctl start  arduino-router 2>/dev/null || true
 
-    # Fetch the latest release tag from GitHub
-    LATEST=$(curl -fsSL "https://api.github.com/repos/arduino/arduino-cli/releases/latest" \
-        | grep '"tag_name"' | head -1 | sed 's/.*"tag_name": *"//;s/".*//')
-
-    if [ -z "$LATEST" ]; then
-        log "ERROR: Could not determine latest arduino-cli version."
-        return 1
-    fi
-
-    # Strip leading 'v' for the download URL filename
-    VERSION="${LATEST#v}"
-    URL="https://github.com/arduino/arduino-cli/releases/download/${LATEST}/arduino-cli_${VERSION}_Linux_ARM64.tar.gz"
-
-    log "Downloading arduino-cli ${VERSION}..."
-    TMP=$(mktemp -d)
-    trap "rm -rf $TMP" EXIT
-
-    curl -fsSL "$URL" -o "$TMP/arduino-cli.tar.gz"
-    tar -xzf "$TMP/arduino-cli.tar.gz" -C "$TMP"
-    install -m 755 "$TMP/arduino-cli" "$ARDUINO_CLI_INSTALL_DIR/arduino-cli"
-
-    log "arduino-cli ${VERSION} installed to $ARDUINO_CLI_INSTALL_DIR"
-}
-
-if ! command -v arduino-cli &>/dev/null; then
-    install_arduino_cli || {
-        log "WARNING: Could not install arduino-cli automatically."
-        log "  Flash firmware/uno-q-firmware/uno-q-firmware.ino manually via Arduino IDE"
-        log "  with board: $FQBN"
-        log "  Then re-run this script or restart viam-agent."
-        # Still proceed to disable arduino-router below
-        ARDUINO_CLI=""
-    }
+# ---------------------------------------------------------------------------
+# 2. Best-effort firmware flash. If arduino-cli isn't present, assume the
+#    firmware was flashed another way (e.g. Arduino App Lab) and continue.
+# ---------------------------------------------------------------------------
+ARDUINO_CLI="$(command -v arduino-cli || true)"
+if [ -z "$ARDUINO_CLI" ]; then
+    log "arduino-cli not found — skipping auto-flash."
+    log "If the firmware is not already on the STM32, flash $SKETCH_DIR"
+    log "(model Arduino UNO Q) via Arduino App Lab or arduino-cli."
+    exit 0
 fi
 
-# Re-check after attempted install
-ARDUINO_CLI=$(command -v arduino-cli 2>/dev/null || true)
-
-# ---------------------------------------------------------------------------
-# Step 2: Install the arduino:zephyr platform if needed
-# ---------------------------------------------------------------------------
-if [ -n "$ARDUINO_CLI" ]; then
-    if ! "$ARDUINO_CLI" core list 2>/dev/null | grep -q "arduino:zephyr"; then
-        log "Installing arduino:zephyr board platform..."
-        "$ARDUINO_CLI" core update-index 2>&1 || true
-        "$ARDUINO_CLI" core install arduino:zephyr 2>&1 && \
-            log "arduino:zephyr platform installed." || \
-            log "WARNING: Platform install failed — firmware flash may not work."
-    else
-        log "arduino:zephyr platform already installed."
-    fi
+if ! "$ARDUINO_CLI" core list 2>/dev/null | grep -q "arduino:zephyr"; then
+    log "Installing arduino:zephyr core..."
+    "$ARDUINO_CLI" core update-index >/dev/null 2>&1 || true
+    "$ARDUINO_CLI" core install arduino:zephyr >/dev/null 2>&1 || log "WARN: core install failed"
 fi
 
-# ---------------------------------------------------------------------------
-# Step 3: Flash STM32 firmware
-# The arduino-router provides JTAG/SWD access to the STM32 for flashing.
-# It must be running during this step.
-# ---------------------------------------------------------------------------
-if [ -n "$ARDUINO_CLI" ] && [ -f "$FIRMWARE" ]; then
-    FQBN=$(detect_fqbn)
-    if [ -z "$FQBN" ]; then
-        log "WARNING: Could not detect Arduino Uno Q FQBN from installed platform."
-        log "  Flash $FIRMWARE manually via Arduino IDE."
-    else
-        log "Detected FQBN: $FQBN"
-    fi
-fi
+# The RouterBridge sketch requires the Arduino_RouterBridge library.
+"$ARDUINO_CLI" lib install Arduino_RouterBridge >/dev/null 2>&1 || log "WARN: Arduino_RouterBridge lib install failed"
 
-if [ -n "$ARDUINO_CLI" ] && [ -f "$FIRMWARE" ] && [ -n "$FQBN" ]; then
-    log "Ensuring arduino-router is running for JTAG access..."
-    systemctl start arduino-router 2>/dev/null || true
-    sleep 3  # allow router to initialize
+# Detect the UNO Q FQBN; fall back to the well-known value.
+FQBN="$("$ARDUINO_CLI" board listall 2>/dev/null | grep -iE 'uno.?q' | grep -o 'arduino:zephyr:[^ ]*' | head -1)"
+[ -z "$FQBN" ] && FQBN="arduino:zephyr:unoq"
+log "Using FQBN: $FQBN"
 
+if [ -d "$SKETCH_DIR" ]; then
     log "Compiling firmware..."
-    if "$ARDUINO_CLI" compile --fqbn "$FQBN" "$FIRMWARE" 2>&1; then
-        log "Uploading firmware to STM32..."
-        if "$ARDUINO_CLI" upload --fqbn "$FQBN" "$FIRMWARE" 2>&1; then
-            log "Firmware flashed successfully."
+    if "$ARDUINO_CLI" compile --fqbn="$FQBN" "$SKETCH_DIR" >/dev/null 2>&1; then
+        log "Uploading firmware..."
+        if "$ARDUINO_CLI" upload --fqbn="$FQBN" "$SKETCH_DIR" >/dev/null 2>&1; then
+            log "Firmware flashed."
         else
-            log "WARNING: Firmware upload failed."
-            log "  Flash firmware/uno-q-firmware/uno-q-firmware.ino manually via Arduino IDE."
+            log "WARN: upload failed — flash manually or via Arduino App Lab."
         fi
     else
-        log "WARNING: Firmware compile failed."
-        log "  Flash firmware/uno-q-firmware/uno-q-firmware.ino manually via Arduino IDE."
+        log "WARN: compile failed — flash manually or via Arduino App Lab."
     fi
-elif [ ! -f "$FIRMWARE" ]; then
-    log "WARNING: Firmware not found at $FIRMWARE — skipping flash."
 fi
 
-# ---------------------------------------------------------------------------
-# Step 4: Stop and permanently disable arduino-router
-# The viam:arduino module communicates directly over /dev/ttyHS1.
-# The router holds that port exclusively and must not run alongside the module.
-# ---------------------------------------------------------------------------
-log "Stopping and disabling arduino-router (module will own /dev/ttyHS1 directly)..."
-systemctl stop    arduino-router 2>/dev/null || true
-systemctl disable arduino-router 2>/dev/null || true
-
-# The router's ExecStopPost toggles GPIO 38, which resets the STM32.
-# Zephyr needs several seconds to boot before Serial1 is ready to receive
-# commands. Without this sleep the module starts immediately after setup
-# and all HELLO attempts during the boot window are silently discarded.
-log "Waiting for STM32 to complete boot sequence..."
-sleep 15
-
-log "Setup complete."
-log "The viam:arduino module will pulse GPIO 37 to wake the STM32 on each"
-log "connect and communicate directly over /dev/ttyHS1 at 115200 baud."
+log "Setup complete. The module connects to the STM32 via arduino-router."

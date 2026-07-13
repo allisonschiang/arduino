@@ -3,24 +3,21 @@
   "module_id": "viam:arduino",
   "visibility": "public_unlisted",
   "url": "https://github.com/viam-labs/arduino",
-  "description": "Modular board component: uno-q",
+  "description": "Viam board module for the Arduino UNO Q — GPIO, analog, PWM, and digital interrupts on the STM32 coprocessor via the arduino-router bridge.",
   "models": [
     {
       "api": "rdk:component:board",
       "model": "viam:arduino:uno-q",
-      "markdown_link": "viam_arduino_uno-q.md"
+      "short_description": "Arduino UNO Q board: GPIO, analog reads, PWM, and digital interrupts over the arduino-router RPC bridge.",
+      "markdown_link": "README.md#configure-your-uno-q-board"
     }
   ],
-  "applications": null,
   "markdown_link": "README.md",
   "entrypoint": "bin/arduino",
   "first_run": "setup.sh",
   "build": {
-    "build": "make module.tar.gz",
-    "setup": "make setup",
-    "path": "module.tar.gz",
-    "arch": [
-      "linux/arm64"
-    ]
+    "build": "make module",
+    "path": "bin/module.tar.gz",
+    "arch": ["linux/arm64"]
   }
 }

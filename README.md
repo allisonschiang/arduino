@@ -1,86 +1,142 @@
-# `viam:arduino` — Arduino Uno Q board module
+# `viam:arduino` — Arduino UNO Q board module
 
-A [Viam modular component](https://docs.viam.com/registry/) that exposes the **Arduino Uno Q**'s GPIO, PWM, and analog I/O to a viam-server machine.
+A [Viam module](https://docs.viam.com/registry/) that exposes the **Arduino UNO Q**'s
+GPIO, analog inputs, PWM, and digital interrupts to a `viam-server` machine. It
+implements the [`rdk:component:board`](https://docs.viam.com/components/board/) API.
 
-The module runs on the Uno Q's **Qualcomm Linux SoC** and communicates with the onboard **STM32U585** coprocessor over the internal UART (`/dev/ttyHS1`). It implements the [`rdk:component:board`](https://docs.viam.com/components/board/) API.
+The module runs on the UNO Q's **Qualcomm Linux SoC** and talks to the onboard
+**STM32U585** coprocessor through Arduino's **`arduino-router`** service using
+MessagePack-RPC. See [DESIGN.md](DESIGN.md) for why this is the supported path on
+the UNO Q.
 
 ## Architecture
 
 ```
 viam-server (Qualcomm Linux SoC)
-    └── viam:arduino module
-            │ UART /dev/ttyHS1 @ 115200 baud
-            ▼
-        STM32U585 (firmware/uno-q-firmware/uno-q-firmware.ino)
-            └── GPIO / PWM / ADC headers
+  └── viam:arduino:uno-q module (Go)
+        │  MessagePack-RPC over /var/run/arduino-router.sock
+        ▼
+     arduino-router (Arduino's bridge service)
+        │  internal link
+        ▼
+     STM32U585  (firmware/uno-q-firmware — Arduino_RouterBridge sketch)
+        └── GPIO / PWM / ADC / interrupts on the headers
 ```
 
-The module communicates directly over `/dev/ttyHS1` after `setup.sh` stops the `arduino-router` service (which otherwise owns that port). The STM32 wake signal (GPIO 37) is pulsed once by `setup.sh` during first-run setup — not by the module on each connection.
+The module is a **client of `arduino-router`** — the router must be running (it is
+by default). The firmware registers RPC methods (`gpio_set`, `gpio_get`, `pwm_set`,
+`pwm_freq`, `adc_read`, `int_config`) and pushes `tick` notifications on interrupt
+edges.
 
 ## Models
 
 | Model | Description |
 |-------|-------------|
-| [`viam:arduino:uno-q`](viam_arduino_uno-q.md) | Board component for the Arduino Uno Q |
+| `viam:arduino:uno-q` | Board component for the Arduino UNO Q |
 
 ## Requirements
 
-- **Hardware:** Arduino Uno Q
-- **Firmware:** Flash `firmware/uno-q-firmware/uno-q-firmware.ino` to the STM32 via Arduino IDE with the `arduino:zephyr` platform installed. The firmware uses `Serial1` (D0/D1, the Qualcomm-facing UART) — not `Serial` (USB CDC).
-- **arduino-router service:** Must be stopped before the module starts, otherwise it holds `/dev/ttyHS1` exclusively.
+- **Hardware:** Arduino UNO Q.
+- **Firmware:** `firmware/uno-q-firmware/uno-q-firmware.ino`, built against the
+  `arduino:zephyr` core with the **Arduino_RouterBridge** library, flashed to the
+  STM32. `setup.sh` attempts this automatically on first install; you can also
+  flash it via Arduino App Lab / `arduino-cli`.
+- **`arduino-router` service:** must be **running** (the default on the UNO Q).
+  The module talks through it, so don't disable it.
 
-## Setup
+## Configure your UNO Q board
 
-The `setup.sh` script runs automatically on first install (via Viam's `first_run` mechanism). It:
+Add a `viam:arduino:uno-q` board component to your machine and give it the
+attributes below.
 
-1. **Flashes the STM32 firmware** via `arduino-cli` (if available on the board)
-2. **Stops and permanently disables `arduino-router`** so the module can own `/dev/ttyHS1` directly
+### Attributes
 
-If `arduino-cli` is not available, the firmware must be flashed manually:
+| Name | Type | Inclusion | Default | Description |
+|------|------|-----------|---------|-------------|
+| `router_socket` | string | Optional | `/var/run/arduino-router.sock` | Path to the `arduino-router` Unix socket. |
+| `analogs` | array | Optional | `[]` | Analog input channels to expose by name (see below). |
+| `digital_interrupts` | array | Optional | `[]` | Digital interrupt channels to expose by name (see below). |
 
-1. Install the `arduino:zephyr` platform in Arduino IDE via Boards Manager
-2. Select **Arduino Uno Q** as the target board  
-3. Open `firmware/uno-q-firmware/uno-q-firmware.ino` and upload
+`analogs[]` items: `name` (used with `AnalogByName`) and `pin` (`"0"`–`"5"` for A0–A5).
 
-The firmware uses `Serial1` (D0/D1 — the Qualcomm-facing hardware UART) at 115200 baud, **not** `Serial` (USB CDC to the host).
+`digital_interrupts[]` items: `name` (used with `DigitalInterruptByName`), `pin`
+(Arduino pin number, e.g. `"2"`), and `mode` (`"RISING"`, `"FALLING"`, or
+`"CHANGE"` — default `"CHANGE"`).
 
-## Deployment
-
-The module binary must be compiled for Linux ARM64 and copied to the board:
-
-```bash
-# Cross-compile on your Mac
-GOARCH=arm64 GOOS=linux go build -o viam-arduino-uno-q ./cmd/module/
-
-# Copy to the board
-scp viam-arduino-uno-q arduino@<board-ip>:/home/arduino/viam-arduino-uno-q
-```
-
-Configure as a local module in [app.viam.com](https://app.viam.com):
+### Example configuration
 
 ```json
 {
-  "modules": [
-    {
-      "type": "local",
-      "name": "arduino",
-      "executable_path": "/home/arduino/viam-arduino-uno-q"
-    }
+  "analogs": [
+    { "name": "joystick_x", "pin": "0" },
+    { "name": "thermistor", "pin": "1" }
+  ],
+  "digital_interrupts": [
+    { "name": "encoder-a", "pin": "2", "mode": "CHANGE" },
+    { "name": "button",    "pin": "3", "mode": "RISING" }
   ]
 }
 ```
 
+A minimal config is `{}` — the router socket defaults, and no analog/interrupt
+channels are exposed until you declare them.
+
+## Capabilities
+
+### Digital GPIO
+Any digital pin by number. Pins are created lazily on first access.
+```python
+pin = await board.gpio_pin_by_name("13")
+await pin.set(True)      # drive high (3.3 V)
+high = await pin.get()   # read back
+```
+
+### PWM
+Supported on pins **2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 20, 21**. Duty is 0.0–1.0.
+```python
+pin = await board.gpio_pin_by_name("9")
+await pin.set_pwm(0.5)         # 50% duty
+await pin.set_pwm_freq(1000)   # 1 kHz
+```
+`pwm()` / `pwm_freq()` return the **last value set** — the STM32 can't read them
+back, so the module caches them.
+
+The minimum settable frequency depends on the pin's timer (its prescaler is fixed
+in the board firmware). Pins on TIM1/TIM8 (**5, 7, 11, 12, 13**) reach down to
+~38 Hz; the others have a floor near ~488 Hz, except **2, 20, 21** (a 32-bit timer,
+effectively no floor). For low-frequency PWM, use pin 5.
+
+### Analog input
+Channels A0–A5, declared in `analogs`, 12-bit (0–4095), 3.3 V reference.
+```python
+reader = await board.analog_by_name("joystick_x")
+reading = await reader.read()   # reading.value in 0..4095
+```
+
+### Digital interrupts
+Declared in `digital_interrupts`. `Value()` returns the cumulative tick count;
+`StreamTicks` streams edges.
+```python
+di = await board.digital_interrupt_by_name("encoder-a")
+count = await di.value()
+```
+
+## Not supported
+
+| Feature | Status |
+|---------|--------|
+| Analog write | A0–A5 are input-only |
+| `SetPowerMode` | not supported (returns unimplemented) |
+| `pwm()` / `pwm_freq()` hardware read-back | cached module-side instead |
+
 ## Development
 
 ```bash
-# Install dependencies
-make setup
-
-# Run unit tests (uses mock serial — no hardware required)
-go test -race ./...
-
-# Cross-compile for the board
-GOARCH=arm64 GOOS=linux go build -o viam-arduino-uno-q ./cmd/module/
+make setup            # go mod tidy
+make test             # go test -race ./...  (mock RPC — no hardware needed)
+make module           # static build + bin/module.tar.gz
 ```
 
-See [DEVELOPER_GUIDE.md](DEVELOPER_GUIDE.md) for details on the module lifecycle.
+The transport is behind the `sender` interface (`rpc.go`); tests inject a mock,
+so the full board logic is verified without hardware. See [DESIGN.md](DESIGN.md)
+for the architecture and the RPC method contract.

@@ -4,50 +4,39 @@ import (
 	"sync"
 	"testing"
 
-	"go.viam.com/rdk/components/board"
+	board "go.viam.com/rdk/components/board"
+	"go.viam.com/test"
 )
 
 func TestGPIOPinByName(t *testing.T) {
 	b, _ := newTestBoard(t)
 
 	pin, err := b.GPIOPinByName("13")
-	if err != nil {
-		t.Fatalf("GPIOPinByName: %v", err)
-	}
-	if pin == nil {
-		t.Fatal("expected non-nil pin")
-	}
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, pin, test.ShouldNotBeNil)
 
-	// same name returns same object (cached)
-	pin2, _ := b.GPIOPinByName("13")
-	if pin != pin2 {
-		t.Fatal("expected same pin object for same name")
-	}
+	// Same name returns the same cached object.
+	pin2, err := b.GPIOPinByName("13")
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, pin2, test.ShouldEqual, pin)
 }
 
 func TestAnalogByName(t *testing.T) {
 	b, _ := newTestBoard(t)
-	// inject directly (normally populated from config)
 	b.analogs["adc0"] = &analogPin{channel: "0", serial: b.serial}
 
 	a, err := b.AnalogByName("adc0")
-	if err != nil {
-		t.Fatalf("AnalogByName: %v", err)
-	}
-	if a == nil {
-		t.Fatal("expected non-nil analog")
-	}
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, a, test.ShouldNotBeNil)
 }
 
-func TestAnalogByName_NotFound(t *testing.T) {
+func TestAnalogByNameNotFound(t *testing.T) {
 	b, _ := newTestBoard(t)
 	_, err := b.AnalogByName("missing")
-	if err == nil {
-		t.Fatal("expected error for missing analog")
-	}
+	test.That(t, err, test.ShouldNotBeNil)
 }
 
-func TestGPIOPinByName_Concurrent(t *testing.T) {
+func TestGPIOPinByNameConcurrent(t *testing.T) {
 	b, _ := newTestBoard(t)
 
 	const goroutines = 20
@@ -59,10 +48,7 @@ func TestGPIOPinByName_Concurrent(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			p, err := b.GPIOPinByName("7")
-			if err != nil {
-				t.Errorf("GPIOPinByName: %v", err)
-				return
-			}
+			test.That(t, err, test.ShouldBeNil)
 			pins[idx] = p
 		}()
 	}
@@ -70,8 +56,6 @@ func TestGPIOPinByName_Concurrent(t *testing.T) {
 
 	// All goroutines must have received the identical cached pin object.
 	for i := 1; i < goroutines; i++ {
-		if pins[i] != pins[0] {
-			t.Fatalf("goroutine %d got different pin object (expected same cached pointer)", i)
-		}
+		test.That(t, pins[i], test.ShouldEqual, pins[0])
 	}
 }

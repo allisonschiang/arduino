@@ -4,96 +4,54 @@ import (
 	"context"
 	"math"
 	"testing"
+
+	"go.viam.com/test"
 )
 
-func TestAnalogPin_Read(t *testing.T) {
-	b, mock := newTestBoard(t, mockResponse{"OK 2048", nil})
-	pin := &analogPin{channel: "0", serial: b.serial}
+func TestAnalogPinRead(t *testing.T) {
+	mock := newMockSender()
+	mock.on("adc_read", func([]interface{}) (interface{}, error) { return 2048, nil })
+	pin := &analogPin{channel: "0", serial: mock}
 
 	val, err := pin.Read(context.Background(), nil)
-	if err != nil {
-		t.Fatalf("Read: %v", err)
-	}
-	if val.Value != 2048 {
-		t.Fatalf("expected Value=2048, got %d", val.Value)
-	}
-	if val.Min != 0 {
-		t.Fatalf("expected Min=0, got %f", val.Min)
-	}
-	// float32 comparison: use tolerance instead of == to avoid precision issues
-	if math.Abs(float64(val.Max)-3.3) > 1e-4 {
-		t.Fatalf("expected Max≈3.3, got %f", val.Max)
-	}
-	if mock.sent[1] != "ADC 0" {
-		t.Fatalf("expected ADC 0, got %q", mock.sent[1])
-	}
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, val.Value, test.ShouldEqual, 2048)
+	test.That(t, math.Abs(float64(val.Max)-3.3) < 1e-4, test.ShouldBeTrue)
+
+	c, ok := mock.lastCall("adc_read")
+	test.That(t, ok, test.ShouldBeTrue)
+	test.That(t, c.args, test.ShouldResemble, []interface{}{0})
 }
 
-func TestAnalogPin_Read_Max(t *testing.T) {
-	b, _ := newTestBoard(t, mockResponse{"OK 4095", nil})
-	pin := &analogPin{channel: "3", serial: b.serial}
-
+func TestAnalogPinReadMax(t *testing.T) {
+	mock := newMockSender()
+	mock.on("adc_read", func([]interface{}) (interface{}, error) { return 4095, nil })
+	pin := &analogPin{channel: "3", serial: mock}
 	val, err := pin.Read(context.Background(), nil)
-	if err != nil {
-		t.Fatalf("Read: %v", err)
-	}
-	if val.Value != 4095 {
-		t.Fatalf("expected Value=4095, got %d", val.Value)
-	}
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, val.Value, test.ShouldEqual, 4095)
 }
 
-func TestAnalogPin_Write_NotSupported(t *testing.T) {
-	b, _ := newTestBoard(t)
-	pin := &analogPin{channel: "0", serial: b.serial}
-	if err := pin.Write(context.Background(), 0, nil); err == nil {
-		t.Fatal("expected error for Write on analog input")
-	}
+func TestAnalogPinWriteNotSupported(t *testing.T) {
+	pin := &analogPin{channel: "0", serial: newMockSender()}
+	test.That(t, pin.Write(context.Background(), 0, nil), test.ShouldNotBeNil)
 }
 
-func TestAnalogPin_Read_Zero(t *testing.T) {
-	b, _ := newTestBoard(t, mockResponse{"OK 0", nil})
-	pin := &analogPin{channel: "0", serial: b.serial}
-
-	val, err := pin.Read(context.Background(), nil)
-	if err != nil {
-		t.Fatalf("Read: %v", err)
-	}
-	if val.Value != 0 {
-		t.Fatalf("expected Value=0, got %d", val.Value)
-	}
-}
-
-func TestAnalogPin_Read_FirmwareErr(t *testing.T) {
-	b, _ := newTestBoard(t, mockResponse{"ERR invalid ADC channel", nil})
-	pin := &analogPin{channel: "9", serial: b.serial}
-
+func TestAnalogPinReadFirmwareReject(t *testing.T) {
+	mock := newMockSender()
+	// -1 signals an invalid channel from the firmware.
+	mock.on("adc_read", func([]interface{}) (interface{}, error) { return -1, nil })
+	pin := &analogPin{channel: "9", serial: mock}
 	_, err := pin.Read(context.Background(), nil)
-	if err == nil {
-		t.Fatal("expected error from firmware ERR response")
-	}
+	test.That(t, err, test.ShouldNotBeNil)
 }
 
-func TestAnalogPin_Read_ParseErr(t *testing.T) {
-	b, _ := newTestBoard(t, mockResponse{"OK notanumber", nil})
-	pin := &analogPin{channel: "0", serial: b.serial}
-
-	_, err := pin.Read(context.Background(), nil)
-	if err == nil {
-		t.Fatal("expected parse error for non-integer ADC response")
-	}
-}
-
-func TestAnalogPin_Read_StepSize(t *testing.T) {
-	b, _ := newTestBoard(t, mockResponse{"OK 1000", nil})
-	pin := &analogPin{channel: "0", serial: b.serial}
-
+func TestAnalogPinReadStepSize(t *testing.T) {
+	mock := newMockSender()
+	mock.on("adc_read", func([]interface{}) (interface{}, error) { return 1000, nil })
+	pin := &analogPin{channel: "0", serial: mock}
 	val, err := pin.Read(context.Background(), nil)
-	if err != nil {
-		t.Fatalf("Read: %v", err)
-	}
-	// adcStepSize = 3.3 / 4095 ≈ 0.000806
+	test.That(t, err, test.ShouldBeNil)
 	want := float32(3.3 / 4095.0)
-	if math.Abs(float64(val.StepSize)-float64(want)) > 1e-6 {
-		t.Fatalf("expected StepSize≈%f, got %f", want, val.StepSize)
-	}
+	test.That(t, math.Abs(float64(val.StepSize)-float64(want)) < 1e-6, test.ShouldBeTrue)
 }

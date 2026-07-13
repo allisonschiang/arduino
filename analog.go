@@ -3,7 +3,6 @@ package arduino
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	"go.viam.com/rdk/components/board"
 )
@@ -20,19 +19,22 @@ type analogPin struct {
 	serial  sender
 }
 
-// Read sends an ADC command and converts the raw 12-bit result to AnalogValue.
+// Read calls adc_read and converts the raw 12-bit result to AnalogValue.
 func (a *analogPin) Read(ctx context.Context, _ map[string]interface{}) (board.AnalogValue, error) {
-	resp, err := a.serial.send(ctx, fmt.Sprintf("ADC %s", a.channel))
+	channel, err := pinToInt(a.channel)
+	if err != nil {
+		return board.AnalogValue{}, fmt.Errorf("invalid analog channel %q: %w", a.channel, err)
+	}
+	res, err := a.serial.call(ctx, "adc_read", channel)
 	if err != nil {
 		return board.AnalogValue{}, err
 	}
-	if strings.HasPrefix(resp, "ERR") {
-		return board.AnalogValue{}, fmt.Errorf("firmware error: %s", strings.TrimPrefix(resp, "ERR "))
+	value, ok := toInt(res)
+	if !ok {
+		return board.AnalogValue{}, fmt.Errorf("adc_read: unexpected result %v", res)
 	}
-	raw := strings.TrimPrefix(resp, "OK ")
-	var value int
-	if _, err := fmt.Sscanf(raw, "%d", &value); err != nil {
-		return board.AnalogValue{}, fmt.Errorf("parsing ADC response %q: %w", resp, err)
+	if value < 0 {
+		return board.AnalogValue{}, fmt.Errorf("adc_read: firmware rejected channel %s", a.channel)
 	}
 	return board.AnalogValue{
 		Value:    value,
@@ -44,5 +46,5 @@ func (a *analogPin) Read(ctx context.Context, _ map[string]interface{}) (board.A
 
 // Write is not supported — A0–A5 are input-only analog pins.
 func (a *analogPin) Write(_ context.Context, _ int, _ map[string]interface{}) error {
-	return fmt.Errorf("analog write not supported on Arduino Uno Q (pins A0-A5 are input only)")
+	return fmt.Errorf("analog write not supported on Arduino UNO Q (pins A0-A5 are input only)")
 }

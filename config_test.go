@@ -2,89 +2,74 @@ package arduino
 
 import (
 	"testing"
+
+	"go.viam.com/test"
 )
 
-func TestConfigValidate_DigitalInterrupts(t *testing.T) {
+func TestConfigValidateInterrupts(t *testing.T) {
 	cfg := &Config{
-		SerialPath: "/dev/ttyHS1",
-		DigitalInterrupts: []InterruptConfig{
-			{Name: "enc-a", Pin: "2", Mode: "CHANGE"},
-		},
+		DigitalInterrupts: []InterruptConfig{{Name: "enc-a", Pin: "2", Mode: "CHANGE"}},
 	}
 	_, _, err := cfg.Validate("test")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	test.That(t, err, test.ShouldBeNil)
 }
 
-func TestConfigValidate_InterruptMissingPin(t *testing.T) {
-	cfg := &Config{
-		SerialPath:        "/dev/ttyHS1",
-		DigitalInterrupts: []InterruptConfig{{Name: "enc", Pin: ""}},
-	}
+func TestConfigValidateInterruptMissingPin(t *testing.T) {
+	cfg := &Config{DigitalInterrupts: []InterruptConfig{{Name: "enc", Pin: ""}}}
 	_, _, err := cfg.Validate("test")
-	if err == nil {
-		t.Fatal("expected error for missing pin")
-	}
+	test.That(t, err, test.ShouldNotBeNil)
 }
 
-func TestConfigValidate_InterruptModeDefault(t *testing.T) {
-	cfg := &Config{
-		SerialPath: "/dev/ttyHS1",
-		DigitalInterrupts: []InterruptConfig{
-			{Name: "btn", Pin: "3"}, // no Mode
-		},
-	}
-	cfg.Validate("test") //nolint:errcheck
-	if cfg.DigitalInterrupts[0].Mode != "CHANGE" {
-		t.Fatalf("expected default mode CHANGE, got %q", cfg.DigitalInterrupts[0].Mode)
-	}
+func TestConfigValidateInterruptMissingName(t *testing.T) {
+	cfg := &Config{DigitalInterrupts: []InterruptConfig{{Name: "", Pin: "2"}}}
+	_, _, err := cfg.Validate("test")
+	test.That(t, err, test.ShouldNotBeNil)
 }
 
-func TestConfigValidate(t *testing.T) {
-	t.Run("missing serial_path returns error", func(t *testing.T) {
-		cfg := &Config{}
+func TestConfigValidateInterruptModeDefault(t *testing.T) {
+	cfg := &Config{DigitalInterrupts: []InterruptConfig{{Name: "btn", Pin: "3"}}}
+	_, _, err := cfg.Validate("test")
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, cfg.DigitalInterrupts[0].Mode, test.ShouldEqual, "CHANGE")
+}
+
+func TestConfigValidateInterruptInvalidMode(t *testing.T) {
+	cfg := &Config{DigitalInterrupts: []InterruptConfig{{Name: "x", Pin: "2", Mode: "BOGUS"}}}
+	_, _, err := cfg.Validate("test")
+	test.That(t, err, test.ShouldNotBeNil)
+}
+
+func TestConfigValidateInterruptDuplicateName(t *testing.T) {
+	cfg := &Config{DigitalInterrupts: []InterruptConfig{
+		{Name: "dup", Pin: "2"}, {Name: "dup", Pin: "3"},
+	}}
+	_, _, err := cfg.Validate("test")
+	test.That(t, err, test.ShouldNotBeNil)
+}
+
+// The router socket has a default, so a fully empty config is valid.
+func TestConfigValidateEmpty(t *testing.T) {
+	cfg := &Config{}
+	deps, optional, err := cfg.Validate("test")
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, deps, test.ShouldBeNil)
+	test.That(t, optional, test.ShouldBeNil)
+}
+
+func TestConfigValidateAnalogs(t *testing.T) {
+	t.Run("valid", func(t *testing.T) {
+		cfg := &Config{AnalogReaders: []AnalogConfig{{Name: "a0", Pin: "0"}, {Name: "a1", Pin: "1"}}}
 		_, _, err := cfg.Validate("test")
-		if err == nil {
-			t.Fatal("expected error for missing serial_path")
-		}
+		test.That(t, err, test.ShouldBeNil)
 	})
-
-	t.Run("valid config returns no error", func(t *testing.T) {
-		cfg := &Config{SerialPath: "/dev/ttyUSB0"}
+	t.Run("missing name", func(t *testing.T) {
+		cfg := &Config{AnalogReaders: []AnalogConfig{{Name: "", Pin: "0"}}}
 		_, _, err := cfg.Validate("test")
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
+		test.That(t, err, test.ShouldNotBeNil)
 	})
-
-	t.Run("baud_rate defaults to 115200 after Validate", func(t *testing.T) {
-		cfg := &Config{SerialPath: "/dev/ttyUSB0"}
-		cfg.Validate("test") //nolint:errcheck
-		if cfg.BaudRate != 115200 {
-			t.Fatalf("expected 115200, got %d", cfg.BaudRate)
-		}
-	})
-
-	t.Run("custom baud_rate is preserved after Validate", func(t *testing.T) {
-		cfg := &Config{SerialPath: "/dev/ttyUSB0", BaudRate: 9600}
-		cfg.Validate("test") //nolint:errcheck
-		if cfg.BaudRate != 9600 {
-			t.Fatalf("expected 9600 preserved, got %d", cfg.BaudRate)
-		}
-	})
-
-	t.Run("analog readers config validates cleanly", func(t *testing.T) {
-		cfg := &Config{
-			SerialPath: "/dev/ttyUSB0",
-			AnalogReaders: []AnalogConfig{
-				{Name: "a0", Pin: "0"},
-				{Name: "a1", Pin: "1"},
-			},
-		}
+	t.Run("duplicate name", func(t *testing.T) {
+		cfg := &Config{AnalogReaders: []AnalogConfig{{Name: "a", Pin: "0"}, {Name: "a", Pin: "1"}}}
 		_, _, err := cfg.Validate("test")
-		if err != nil {
-			t.Fatalf("unexpected error with analog readers: %v", err)
-		}
+		test.That(t, err, test.ShouldNotBeNil)
 	})
 }

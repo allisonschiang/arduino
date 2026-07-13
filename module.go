@@ -2,6 +2,7 @@ package arduino
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -10,11 +11,16 @@ import (
 
 	pb "go.viam.com/api/component/board/v1"
 	board "go.viam.com/rdk/components/board"
+	viamgrpc "go.viam.com/rdk/grpc"
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/resource"
 )
 
+// UnoQ is the board model this module registers.
 var UnoQ = resource.NewModel("viam", "arduino", "uno-q")
+
+// firmwareVersion is the value the firmware's "hello" RPC must return.
+const firmwareVersion = "UNO-Q v2"
 
 func init() {
 	resource.RegisterComponent(board.API, UnoQ,
@@ -37,38 +43,62 @@ type InterruptConfig struct {
 	Mode string `json:"mode,omitempty"` // "RISING", "FALLING", or "CHANGE" (default)
 }
 
-// Config holds the configuration for the Arduino Uno Q board component.
+// Config holds the configuration for the Arduino UNO Q board component.
+// RouterSocket is optional and defaults to the standard arduino-router Unix socket.
 type Config struct {
-	SerialPath        string            `json:"serial_path"`
-	BaudRate          int               `json:"baud_rate,omitempty"`
+	RouterSocket      string            `json:"router_socket,omitempty"`
 	AnalogReaders     []AnalogConfig    `json:"analogs,omitempty"`
 	DigitalInterrupts []InterruptConfig `json:"digital_interrupts,omitempty"`
 }
 
-// Validate ensures all parts of the config are valid and important fields exist.
+// Validate ensures the config is valid and fills in defaults. It declares no
+// resource dependencies. Returns (requiredDeps, optionalDeps, error).
 func (cfg *Config) Validate(path string) ([]string, []string, error) {
-	if cfg.SerialPath == "" {
-		return nil, nil, fmt.Errorf("%s: serial_path is required", path)
+	seen := map[string]bool{}
+	for i, ar := range cfg.AnalogReaders {
+		if ar.Name == "" {
+			return nil, nil, resource.NewConfigValidationFieldRequiredError(fmt.Sprintf("%s.analogs.%d", path, i), "name")
+		}
+		if ar.Pin == "" {
+			return nil, nil, resource.NewConfigValidationFieldRequiredError(fmt.Sprintf("%s.analogs.%d", path, i), "pin")
+		}
+		if seen[ar.Name] {
+			return nil, nil, resource.NewConfigValidationError(path, fmt.Errorf("duplicate analog name %q", ar.Name))
+		}
+		seen[ar.Name] = true
 	}
-	if cfg.BaudRate == 0 {
-		cfg.BaudRate = 115200
-	}
-	for i, ic := range cfg.DigitalInterrupts {
+	iseen := map[string]bool{}
+	for i := range cfg.DigitalInterrupts {
+		ic := &cfg.DigitalInterrupts[i]
+		field := fmt.Sprintf("%s.digital_interrupts.%d", path, i)
 		if ic.Name == "" {
-			return nil, nil, fmt.Errorf("%s: digital_interrupts[%d]: name is required", path, i)
+			return nil, nil, resource.NewConfigValidationFieldRequiredError(field, "name")
 		}
 		if ic.Pin == "" {
-			return nil, nil, fmt.Errorf("%s: digital_interrupts[%d]: pin is required", path, i)
+			return nil, nil, resource.NewConfigValidationFieldRequiredError(field, "pin")
 		}
-		if cfg.DigitalInterrupts[i].Mode == "" {
-			cfg.DigitalInterrupts[i].Mode = "CHANGE"
+		if iseen[ic.Name] {
+			return nil, nil, resource.NewConfigValidationError(path, fmt.Errorf("duplicate digital_interrupt name %q", ic.Name))
+		}
+		iseen[ic.Name] = true
+		switch ic.Mode {
+		case "":
+			ic.Mode = "CHANGE"
+		case "RISING", "FALLING", "CHANGE":
+		default:
+			return nil, nil, resource.NewConfigValidationError(field,
+				errors.New(`mode must be one of "RISING", "FALLING", or "CHANGE"`))
 		}
 	}
 	return nil, nil, nil
 }
 
 type arduinoUnoQ struct {
-	name resource.Name
+	resource.Named
+	// AlwaysRebuild: any config change tears the board down and reconstructs it.
+	// The transport (router socket) is reopened from scratch anyway, so a clean
+	// rebuild is simpler and safer than an in-place reconfigure.
+	resource.AlwaysRebuild
 
 	mu         sync.Mutex
 	serial     sender
@@ -87,9 +117,9 @@ type arduinoUnoQ struct {
 
 // NewUnoQ is exported for use by the CLI and testing utilities.
 func NewUnoQ(ctx context.Context, _ resource.Dependencies, name resource.Name, conf *Config, logger logging.Logger) (board.Board, error) {
-	conn, err := openSerial(conf.SerialPath, conf.BaudRate)
+	conn, err := openRPC(conf.RouterSocket)
 	if err != nil {
-		return nil, fmt.Errorf("opening serial port %s: %w", conf.SerialPath, err)
+		return nil, err
 	}
 	return newBoardWithSender(ctx, name, conf, conn, logger)
 }
@@ -99,9 +129,9 @@ func newArduinoUnoQ(ctx context.Context, _ resource.Dependencies, rawConf resour
 	if err != nil {
 		return nil, err
 	}
-	conn, err := openSerial(conf.SerialPath, conf.BaudRate)
+	conn, err := openRPC(conf.RouterSocket)
 	if err != nil {
-		return nil, fmt.Errorf("opening serial port %s: %w", conf.SerialPath, err)
+		return nil, err
 	}
 	return newBoardWithSender(ctx, rawConf.ResourceName(), conf, conn, logger)
 }
@@ -109,7 +139,7 @@ func newArduinoUnoQ(ctx context.Context, _ resource.Dependencies, rawConf resour
 func newBoardWithSender(ctx context.Context, name resource.Name, conf *Config, s sender, logger logging.Logger) (*arduinoUnoQ, error) {
 	cancelCtx, cancelFunc := context.WithCancel(context.Background())
 	b := &arduinoUnoQ{
-		name:       name,
+		Named:      name.AsNamed(),
 		serial:     s,
 		gpios:      map[string]*gpioPin{},
 		analogs:    map[string]*analogPin{},
@@ -118,116 +148,78 @@ func newBoardWithSender(ctx context.Context, name resource.Name, conf *Config, s
 		cfg:        conf,
 		cancelFunc: cancelFunc,
 	}
-	if err := b.hello(ctx); err != nil {
+	fail := func(err error) (*arduinoUnoQ, error) {
 		s.close()
 		cancelFunc()
 		return nil, err
+	}
+	if err := b.hello(ctx); err != nil {
+		return fail(err)
+	}
+	// Claim "tick" notifications so the firmware's interrupt edges route to us:
+	// arduino-router forwards a notification only to the client that registered
+	// its method name — it does not broadcast.
+	if err := b.registerTick(ctx); err != nil {
+		return fail(err)
 	}
 	for _, ar := range conf.AnalogReaders {
 		b.analogs[ar.Name] = &analogPin{channel: ar.Pin, serial: b.serial}
 	}
 	if err := b.configureInterrupts(conf.DigitalInterrupts); err != nil {
-		s.close()
-		cancelFunc()
-		return nil, err
+		return fail(err)
 	}
 	go b.tickDispatcher(s, cancelCtx)
 	return b, nil
 }
 
+// registerTick claims the "tick" notification method with arduino-router so the
+// firmware's tick notifications are routed to this connection. Tolerates an
+// already-registered route.
+func (b *arduinoUnoQ) registerTick(ctx context.Context) error {
+	rctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if _, err := b.serial.call(rctx, "$/register", "tick"); err != nil {
+		if strings.Contains(err.Error(), "already exists") {
+			return nil
+		}
+		return fmt.Errorf("registering tick notifications: %w", err)
+	}
+	return nil
+}
+
+// hello performs the firmware handshake, retrying until the overall deadline so a
+// freshly-booted STM32 (or a router still bringing the sketch up) can catch up.
 func (b *arduinoUnoQ) hello(ctx context.Context) error {
 	const (
 		overallTimeout = 30 * time.Second
 		attemptTimeout = 5 * time.Second
 		retryWait      = 500 * time.Millisecond
-		want           = "OK UNO-Q v1"
 	)
 	ctx, cancel := context.WithTimeout(ctx, overallTimeout)
 	defer cancel()
 
 	for {
-		// Per-attempt sub-context so a single slow response doesn't consume
-		// the entire 10 s budget.
 		attemptCtx, attemptCancel := context.WithTimeout(ctx, attemptTimeout)
-		resp, err := b.serial.send(attemptCtx, "HELLO")
+		res, err := b.serial.call(attemptCtx, "hello")
 		attemptCancel()
 
 		if err == nil {
-			if resp != want {
-				return fmt.Errorf("firmware version mismatch: got %q, want %q", resp, want)
-			}
-			// Drain any stale bytes (e.g. the STM32 boot message may have
-			// arrived before our HELLO, leaving an extra response in the
-			// buffer that would shift subsequent commands out of sync).
-			if sc, ok := b.serial.(*serialConn); ok {
-				sc.drain()
+			got, _ := toString(res)
+			if got != firmwareVersion {
+				return fmt.Errorf("firmware version mismatch: got %q, want %q", got, firmwareVersion)
 			}
 			return nil
 		}
 
-		// Overall deadline exceeded — give up.
 		if ctx.Err() != nil {
-			return fmt.Errorf("HELLO handshake timed out after %v: %w", overallTimeout, err)
+			return fmt.Errorf("hello handshake timed out after %v: %w", overallTimeout, err)
 		}
-
-		// Brief pause before the next attempt.
 		select {
 		case <-time.After(retryWait):
 		case <-ctx.Done():
-			return fmt.Errorf("HELLO handshake timed out after %v: %w", overallTimeout, err)
+			return fmt.Errorf("hello handshake timed out after %v: %w", overallTimeout, err)
 		}
 	}
-}
-
-func (b *arduinoUnoQ) Reconfigure(ctx context.Context, _ resource.Dependencies, rawConf resource.Config) error {
-	conf, err := resource.NativeConfig[*Config](rawConf)
-	if err != nil {
-		return err
-	}
-	conn, err := openSerial(conf.SerialPath, conf.BaudRate)
-	if err != nil {
-		return fmt.Errorf("reopening serial port %s: %w", conf.SerialPath, err)
-	}
-	return b.reconfigureWithSender(ctx, conf, conn)
-}
-
-// reconfigureWithSender is extracted so tests can inject a mock sender.
-func (b *arduinoUnoQ) reconfigureWithSender(ctx context.Context, conf *Config, s sender) error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-
-	// Stop the existing tickDispatcher before draining/hello.
-	b.cancelFunc()
-	cancelCtx, cancelFunc := context.WithCancel(context.Background())
-	b.cancelFunc = cancelFunc
-
-	b.tickSubsMu.Lock()
-	b.tickSubs = nil
-	b.tickSubsMu.Unlock()
-
-	if err := b.serial.close(); err != nil {
-		b.logger.Warnw("closing serial port during reconfigure", "err", err)
-	}
-	b.serial = s
-	b.gpios = map[string]*gpioPin{}
-	b.analogs = map[string]*analogPin{}
-	b.interrupts = map[string]*digitalInterrupt{}
-	b.cfg = conf
-	if err := b.hello(ctx); err != nil {
-		return err
-	}
-	for _, ar := range conf.AnalogReaders {
-		b.analogs[ar.Name] = &analogPin{channel: ar.Pin, serial: b.serial}
-	}
-	if err := b.configureInterrupts(conf.DigitalInterrupts); err != nil {
-		return err
-	}
-	go b.tickDispatcher(b.serial, cancelCtx)
-	return nil
-}
-
-func (s *arduinoUnoQ) Name() resource.Name {
-	return s.name
 }
 
 // AnalogByName returns a named analog reader from the config.
@@ -241,56 +233,50 @@ func (b *arduinoUnoQ) AnalogByName(name string) (board.Analog, error) {
 	return a, nil
 }
 
-// configureInterrupts sends an "INT <pin> <mode>" command for each configured
-// interrupt and stores a digitalInterrupt keyed by logical name.
+// configureInterrupts calls int_config for each configured interrupt and stores a
+// digitalInterrupt keyed by logical name.
 func (b *arduinoUnoQ) configureInterrupts(cfgs []InterruptConfig) error {
 	for _, ic := range cfgs {
+		pin, err := pinToInt(ic.Pin)
+		if err != nil {
+			return fmt.Errorf("interrupt %q: %w", ic.Name, err)
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		resp, err := b.serial.send(ctx, fmt.Sprintf("INT %s %s", ic.Pin, ic.Mode))
+		res, err := b.serial.call(ctx, "int_config", pin, ic.Mode)
 		cancel()
 		if err != nil {
 			return fmt.Errorf("configuring interrupt %q on pin %s: %w", ic.Name, ic.Pin, err)
 		}
-		if strings.HasPrefix(resp, "ERR") {
-			return fmt.Errorf("configuring interrupt %q on pin %s: firmware error: %s", ic.Name, ic.Pin, resp)
+		if ok, _ := toBool(res); !ok {
+			return fmt.Errorf("configuring interrupt %q on pin %s: firmware rejected mode %q", ic.Name, ic.Pin, ic.Mode)
 		}
 		b.interrupts[ic.Name] = &digitalInterrupt{name: ic.Name, pin: ic.Pin}
 	}
 	return nil
 }
 
-// tickDispatcher reads TICK lines from the serial connection and fans them
-// out to all active StreamTicks subscribers.
-// For non-serialConn senders (mock), it returns immediately.
-// s and ctx are captured at launch time to avoid a data race with reconfigureWithSender.
+// tickDispatcher reads tick notifications from the transport and fans them out to
+// all active StreamTicks subscribers.
 func (b *arduinoUnoQ) tickDispatcher(s sender, ctx context.Context) {
-	sc, ok := s.(*serialConn)
-	if !ok {
-		return // mock sender — no real TICK channel
-	}
+	ticks := s.ticks()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case line := <-sc.tickRecv:
-			b.dispatchTick(line)
+		case ev, ok := <-ticks:
+			if !ok {
+				return
+			}
+			b.dispatchTick(ev)
 		}
 	}
 }
 
-// dispatchTick parses a "TICK <pin> <high> <micros>" line, increments the
-// matching interrupt counter, and fans the event to all StreamTicks callers.
-func (b *arduinoUnoQ) dispatchTick(line string) {
-	var pin int
-	var high int
-	var micros uint64
-	if _, err := fmt.Sscanf(line, "TICK %d %d %d", &pin, &high, &micros); err != nil {
-		b.logger.Warnw("malformed TICK", "line", line, "err", err)
-		return
-	}
-	pinStr := strconv.Itoa(pin)
+// dispatchTick increments the matching interrupt counter and fans the event to
+// all StreamTicks callers.
+func (b *arduinoUnoQ) dispatchTick(ev tickEvent) {
+	pinStr := strconv.Itoa(ev.pin)
 
-	// Find interrupt by pin, increment counter.
 	b.mu.Lock()
 	var matched *digitalInterrupt
 	for _, di := range b.interrupts {
@@ -308,8 +294,8 @@ func (b *arduinoUnoQ) dispatchTick(line string) {
 
 	tick := board.Tick{
 		Name:             matched.name,
-		High:             high != 0,
-		TimestampNanosec: micros * 1000,
+		High:             ev.high,
+		TimestampNanosec: ev.micros * 1000,
 	}
 
 	b.tickSubsMu.Lock()
@@ -348,28 +334,26 @@ func (b *arduinoUnoQ) GPIOPinByName(name string) (board.GPIOPin, error) {
 	return p, nil
 }
 
-// SetPowerMode is not supported.
+// SetPowerMode is not supported by this board.
 func (b *arduinoUnoQ) SetPowerMode(_ context.Context, _ pb.PowerMode, _ *time.Duration, _ map[string]interface{}) error {
-	return fmt.Errorf("SetPowerMode not supported on Arduino Uno Q")
+	return viamgrpc.UnimplementedError
 }
 
 func (b *arduinoUnoQ) DoCommand(_ context.Context, _ map[string]interface{}) (map[string]interface{}, error) {
-	return nil, fmt.Errorf("DoCommand not implemented")
+	return nil, viamgrpc.UnimplementedError
 }
 
+// Status satisfies the board.Board (resource.Resource) interface.
 func (b *arduinoUnoQ) Status(_ context.Context) (map[string]interface{}, error) {
 	return map[string]interface{}{}, nil
 }
 
-// StreamTicks subscribes ch to all tick events, blocking until ctx is cancelled.
+// StreamTicks subscribes ch to all tick events, cleaning up when ctx is cancelled.
 func (b *arduinoUnoQ) StreamTicks(ctx context.Context, _ []board.DigitalInterrupt, ch chan board.Tick, _ map[string]interface{}) error {
 	b.tickSubsMu.Lock()
 	b.tickSubs = append(b.tickSubs, ch)
 	b.tickSubsMu.Unlock()
 
-	// Return immediately — the gRPC server sends its first "ready" response
-	// after this returns. Clean up the subscriber in a background goroutine
-	// when the caller's context is cancelled.
 	go func() {
 		<-ctx.Done()
 		b.tickSubsMu.Lock()

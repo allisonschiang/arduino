@@ -1,0 +1,24 @@
+run:
+  timeout: 5m
+  modules-download-mode: readonly
+
+linters:
+  disable-all: false
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - gosimple
+    - gofmt
+    - misspell
+    - errorlint
+
+issues:
+  exclude-rules:
+    # Tests may ignore errors on deferred/cleanup calls and use dot-imports.
+    - path: _test\.go
+      linters:
+        - errcheck
+        - errorlint

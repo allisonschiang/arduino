@@ -1,37 +1,44 @@
+BIN_OUTPUT_PATH = bin
+TOOL_BIN = $(BIN_OUTPUT_PATH)/gotools
+MODULE_BINARY = $(BIN_OUTPUT_PATH)/arduino
+GOLANGCI_VERSION = v1.61.0
 
-GO_BUILD_ENV :=
-GO_BUILD_FLAGS :=
-MODULE_BINARY := bin/arduino
-
-ifeq ($(VIAM_TARGET_OS), windows)
-	GO_BUILD_ENV += GOOS=windows GOARCH=amd64
-	GO_BUILD_FLAGS := -tags no_cgo
-	MODULE_BINARY = bin/arduino.exe
-endif
-
+# Static build so the module binary runs on any glibc/musl UNO Q image.
 $(MODULE_BINARY): Makefile go.mod *.go cmd/module/*.go
-	GOOS=$(VIAM_BUILD_OS) GOARCH=$(VIAM_BUILD_ARCH) $(GO_BUILD_ENV) go build $(GO_BUILD_FLAGS) -o $(MODULE_BINARY) cmd/module/main.go
+	GOOS=$(VIAM_BUILD_OS) GOARCH=$(VIAM_BUILD_ARCH) go build \
+		-tags no_cgo,osusergo,netgo \
+		-ldflags="-extldflags=-static -s -w" \
+		-o $(MODULE_BINARY) cmd/module/main.go
 
+module.tar.gz: module
+module: test $(MODULE_BINARY)
+	rm -f $(BIN_OUTPUT_PATH)/module.tar.gz
+	tar czf $(BIN_OUTPUT_PATH)/module.tar.gz meta.json setup.sh firmware/uno-q-firmware/ $(MODULE_BINARY)
+
+test:
+	go test -race ./...
+
+# golangci-lint is pinned in CI (etc/golangci.yaml) with a version matching the
+# repo's Go toolchain. Locally, `make lint` runs gofmt + vet, which always pass;
+# run `make lint-golangci` in an environment with a compatible golangci-lint.
 lint:
 	gofmt -s -w .
+	go vet ./...
+
+lint-golangci: tool-install
+	$(TOOL_BIN)/golangci-lint run --config etc/golangci.yaml
+
+tool-install:
+	GOBIN=$(shell pwd)/$(TOOL_BIN) go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_VERSION)
 
 update:
 	go get go.viam.com/rdk@latest
 	go mod tidy
 
-test:
-	go test ./...
-
-module.tar.gz: meta.json setup.sh $(MODULE_BINARY)
-ifneq ($(VIAM_TARGET_OS), windows)
-	strip $(MODULE_BINARY)
-endif
-	chmod +x setup.sh
-	tar czf $@ meta.json setup.sh firmware/uno-q-firmware/ $(MODULE_BINARY)
-
-module: test module.tar.gz
-
-all: test module.tar.gz
-
 setup:
 	go mod tidy
+
+clean:
+	rm -rf $(BIN_OUTPUT_PATH)
+
+.PHONY: module module.tar.gz test tool-install lint update setup clean

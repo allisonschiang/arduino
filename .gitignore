@@ -32,3 +32,4 @@ bin
 # Viam reload files
 .VIAM_RELOAD_ARCHIVE.tar.gz
 reload-*/
+bin/

@@ -1,195 +1,191 @@
-// Viam Arduino Uno Q board firmware
-// Protocol: ASCII line-based commands over Serial1 at 115200 baud
-// Responses: "OK [value]" or "ERR message"
+// Viam Arduino UNO Q board firmware.
 //
-// IMPORTANT: On the Arduino Uno Q, Serial1 (D0/D1, PB6/PB7) is the UART
-// connected to the Qualcomm Linux SoC via /dev/ttyHS1. Serial (USB CDC)
-// goes to the Mac/host and is NOT used here.
+// Runs on the STM32U585 and communicates with the Linux-side Viam module through
+// Arduino's arduino-router service using the Arduino_RouterBridge library
+// (MessagePack-RPC). It registers the RPC methods the module calls and pushes
+// "tick" notifications on interrupt edges.
 //
-// Before deploying, stop the arduino-router service on the Linux side:
-//   sudo systemctl stop arduino-router
-//   sudo systemctl disable arduino-router
-// The router owns /dev/ttyHS1 by default; disabling it frees the port.
+// Install: Arduino_RouterBridge from the Library Manager. Do not disable
+// arduino-router — this sketch talks through it.
 
-#define FIRMWARE_VERSION "UNO-Q v1"
+#include <Arduino_RouterBridge.h>
+#include <zephyr/drivers/pwm.h>
+
+#define FIRMWARE_VERSION "UNO-Q v2"
 
 // ---- Digital interrupt support ----
 #define MAX_INT_SLOTS 8
 
 struct IntSlot {
-    int  pin;
-    bool active;
-    volatile bool triggered;
-    volatile bool lastHigh;
+  int  pin;
+  bool active;
+  volatile uint32_t count;   // total edges seen (incremented in the ISR)
+  volatile bool lastHigh;    // level at the most recent edge
+  uint32_t emitted;          // edges already sent to the host (loop-only)
 };
 
 static IntSlot intSlots[MAX_INT_SLOTS];
 
-#define MAKE_ISR(N) \
-static void isr##N() { \
-    if (intSlots[N].active) { \
-        intSlots[N].triggered = true; \
-        intSlots[N].lastHigh = (bool)digitalRead(intSlots[N].pin); \
-    } \
-}
+// The ISR counts every edge so fast signals (e.g. encoders) never coalesce;
+// loop() emits one "tick" per counted edge.
+#define MAKE_ISR(N)                                   \
+  static void isr##N() {                              \
+    if (intSlots[N].active) {                         \
+      intSlots[N].count++;                            \
+      intSlots[N].lastHigh = (bool)digitalRead(intSlots[N].pin); \
+    }                                                 \
+  }
 MAKE_ISR(0) MAKE_ISR(1) MAKE_ISR(2) MAKE_ISR(3)
 MAKE_ISR(4) MAKE_ISR(5) MAKE_ISR(6) MAKE_ISR(7)
 
 static voidFuncPtr isrTable[MAX_INT_SLOTS] =
     {isr0, isr1, isr2, isr3, isr4, isr5, isr6, isr7};
 
-// PWM-capable pins (mapped to STM32 timers)
-// 3(TIM2), 5(TIM2), 6(TIM3), 9(TIM1), 10(TIM1), 11(TIM1)
-const int PWM_PINS[] = {3, 5, 6, 9, 10, 11};
-const int PWM_PIN_COUNT = 6;
+// PWM channels come straight from the board devicetree (zephyr_user `pwms`
+// property), so the correct timer/channel + polarity per pin is handled by the
+// Zephyr PWM driver — no hand-rolled timer-register pokes. Both duty and
+// frequency go through pwm_set_dt(), which rescales them together.
+#define PWM_SPEC(node, prop, idx) PWM_DT_SPEC_GET_BY_IDX(node, idx),
+static const struct pwm_dt_spec pwmSpecs[] = {
+  DT_FOREACH_PROP_ELEM(DT_PATH(zephyr_user), pwms, PWM_SPEC)};
+
+// Arduino pin number for each spec above, in devicetree order (D-pins only; the
+// trailing internal-LED channels are ignored).
+//
+// Minimum settable PWM frequency depends on the pin's timer, whose prescaler is
+// fixed in the board overlay (st,prescaler), giving these 16-bit floors:
+//   TIM1 (D5,D11,D12,D13), TIM8 (D7): prescaler 63 -> ~2.5 MHz -> min ~38 Hz
+//   TIM3 (D3,D6,D8), TIM4 (D9,D10):   prescaler 4  -> ~32 MHz  -> min ~488 Hz
+//   TIM2 (D2,D20,D21): prescaler 4, 32-bit counter -> effectively no floor
+// For low-frequency PWM use a TIM1/TIM8 pin (e.g. D5). Verified on hardware.
+static const int pwmPinNums[] = {2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 20, 21};
+#define PWM_PIN_COUNT ((int)(sizeof(pwmPinNums) / sizeof(pwmPinNums[0])))
+
+struct PwmState { uint32_t periodNs; float duty; };
+static PwmState pwmState[PWM_PIN_COUNT];
+
+static int pwmIndex(int pin) {
+  for (int i = 0; i < PWM_PIN_COUNT; i++) {
+    if (pwmPinNums[i] == pin) return i;
+  }
+  return -1;
+}
+
+// ---- RPC handlers ----
+// Returned bool = success where the host cares; false signals a rejected request
+// (e.g. non-PWM pin). digitalWrite/analogRead/analogWrite run here.
+
+static String rpc_hello() {
+  return String(FIRMWARE_VERSION);
+}
+
+static bool rpc_gpio_set(int pin, bool high) {
+  pinMode(pin, OUTPUT);
+  digitalWrite(pin, high ? HIGH : LOW);
+  return true;
+}
+
+static bool rpc_gpio_get(int pin) {
+  pinMode(pin, INPUT);
+  return (bool)digitalRead(pin);
+}
+
+// Returns the raw 0-4095 12-bit reading, or -1 for an invalid channel.
+static int rpc_adc_read(int channel) {
+  if (channel < 0 || channel > 5) return -1;
+  return analogRead(A0 + channel);
+}
+
+static bool rpc_pwm_set(int pin, float duty) {
+  int i = pwmIndex(pin);
+  if (i < 0) return false;
+  if (duty < 0.0f) duty = 0.0f;
+  if (duty > 1.0f) duty = 1.0f;
+  // analogWrite applies the per-channel pinctrl AND initializes the
+  // devicetree deferred-init PWM device. Must run before pwm_is_ready_dt,
+  // which reports not-ready until the device is initialized (e.g. after a
+  // fresh MCU boot, before this pin has ever been driven).
+  analogWrite(pin, (int)(duty * 255.0f));
+  if (!pwm_is_ready_dt(&pwmSpecs[i])) return false;
+  // Default to the devicetree period (500 Hz) until a frequency is set.
+  uint32_t period = pwmState[i].periodNs ? pwmState[i].periodNs : pwmSpecs[i].period;
+  if (pwm_set_dt(&pwmSpecs[i], period, (uint32_t)(duty * period)) != 0) return false;
+  pwmState[i].duty = duty;
+  if (pwmState[i].periodNs == 0) pwmState[i].periodNs = period;
+  return true;
+}
+
+static bool rpc_pwm_freq(int pin, int freqHz) {
+  int i = pwmIndex(pin);
+  if (i < 0 || freqHz <= 0) return false;
+  float duty = pwmState[i].duty;
+  analogWrite(pin, (int)(duty * 255.0f)); // route + init deferred device
+  if (!pwm_is_ready_dt(&pwmSpecs[i])) return false;
+  uint32_t period = 1000000000UL / (uint32_t)freqHz; // nanoseconds
+  if (pwm_set_dt(&pwmSpecs[i], period, (uint32_t)(duty * period)) != 0) return false;
+  pwmState[i].periodNs = period;
+  return true;
+}
+
+// mode: "RISING" | "FALLING" | "CHANGE" | "NONE"
+static bool rpc_int_config(int pin, String mode) {
+  mode.trim();
+
+  // Detach any existing slot for this pin.
+  for (int i = 0; i < MAX_INT_SLOTS; i++) {
+    if (intSlots[i].active && intSlots[i].pin == pin) {
+      detachInterrupt(digitalPinToInterrupt(pin));
+      intSlots[i].active = false;
+      break;
+    }
+  }
+
+  if (mode == "NONE") return true;
+
+  int slot = -1;
+  for (int i = 0; i < MAX_INT_SLOTS; i++) {
+    if (!intSlots[i].active) { slot = i; break; }
+  }
+  if (slot < 0) return false; // no free slots
+
+  PinStatus imode = CHANGE;
+  if (mode == "RISING")  imode = RISING;
+  if (mode == "FALLING") imode = FALLING;
+
+  pinMode(pin, INPUT);
+  intSlots[slot] = { pin, true, 0, (bool)digitalRead(pin), 0 };
+  attachInterrupt(digitalPinToInterrupt(pin), isrTable[slot], imode);
+  return true;
+}
 
 void setup() {
   analogReadResolution(12); // 12-bit ADC: 0-4095
-  Serial1.begin(115200);    // D0/D1 UART — connected to Qualcomm ttyHS1
-  // No while(!Serial) — Serial1 is a hardware UART, always ready
-  Serial1.println("OK " FIRMWARE_VERSION);
+
+  Bridge.begin();
+
+  // provide_safe runs each handler in loop() context (serviced automatically by
+  // the core), so handlers safely share pins with the interrupt bookkeeping below.
+  Bridge.provide_safe("hello",      rpc_hello);
+  Bridge.provide_safe("gpio_set",   rpc_gpio_set);
+  Bridge.provide_safe("gpio_get",   rpc_gpio_get);
+  Bridge.provide_safe("adc_read",   rpc_adc_read);
+  Bridge.provide_safe("pwm_set",    rpc_pwm_set);
+  Bridge.provide_safe("pwm_freq",   rpc_pwm_freq);
+  Bridge.provide_safe("int_config", rpc_int_config);
 }
 
 void loop() {
-  // Poll interrupt slots and emit TICK notifications.
+  // Emit one "tick" notification per counted interrupt edge, catching up if
+  // several edges arrived between iterations (so counts are never lost).
   for (int i = 0; i < MAX_INT_SLOTS; i++) {
-    if (intSlots[i].active && intSlots[i].triggered) {
-      intSlots[i].triggered = false;
-      Serial1.println(
-        "TICK " + String(intSlots[i].pin) +
-        " " + String(intSlots[i].lastHigh ? 1 : 0) +
-        " " + String(micros())
-      );
-    }
-  }
-
-  if (Serial1.available()) {
-    String cmd = Serial1.readStringUntil('\n');
-    cmd.trim();
-    if (cmd.length() > 0) {
-      handleCommand(cmd);
+    if (!intSlots[i].active) continue;
+    uint32_t c = intSlots[i].count; // snapshot the volatile counter
+    while (intSlots[i].emitted < c) {
+      intSlots[i].emitted++;
+      Bridge.notify("tick", intSlots[i].pin, (int)intSlots[i].lastHigh, (uint32_t)micros());
     }
   }
 }
 
-bool isPWMPin(int pin) {
-  for (int i = 0; i < PWM_PIN_COUNT; i++) {
-    if (PWM_PINS[i] == pin) return true;
-  }
-  return false;
-}
-
-void handleCommand(const String& cmd) {
-  int firstSpace = cmd.indexOf(' ');
-  String op = (firstSpace == -1) ? cmd : cmd.substring(0, firstSpace);
-  String rest = (firstSpace == -1) ? "" : cmd.substring(firstSpace + 1);
-
-  if (op == "HELLO") {
-    Serial1.println("OK " FIRMWARE_VERSION);
-
-  } else if (op == "GET") {
-    int pin = rest.toInt();
-    pinMode(pin, INPUT);
-    Serial1.println("OK " + String(digitalRead(pin)));
-
-  } else if (op == "SET") {
-    int sp = rest.indexOf(' ');
-    int pin = rest.substring(0, sp).toInt();
-    int val = rest.substring(sp + 1).toInt();
-    pinMode(pin, OUTPUT);
-    digitalWrite(pin, val ? HIGH : LOW);
-    Serial1.println("OK");
-
-  } else if (op == "PWM") {
-    int sp = rest.indexOf(' ');
-    int pin = rest.substring(0, sp).toInt();
-    float duty = rest.substring(sp + 1).toFloat();
-    if (!isPWMPin(pin)) { Serial1.println("ERR not a PWM pin"); return; }
-    // analogWrite expects 0-255; duty is 0.0-1.0
-    analogWrite(pin, (int)(duty * 255.0));
-    Serial1.println("OK");
-
-  } else if (op == "PWMGET") {
-    Serial1.println("ERR PWMGET not supported on STM32");
-
-  } else if (op == "FREQ") {
-    int sp = rest.indexOf(' ');
-    int pin = rest.substring(0, sp).toInt();
-    int freqHz = rest.substring(sp + 1).toInt();
-    if (!isPWMPin(pin)) { Serial1.println("ERR not a PWM pin"); return; }
-    setTimerFrequency(pin, freqHz);
-    Serial1.println("OK");
-
-  } else if (op == "FREQGET") {
-    Serial1.println("ERR FREQGET not supported on STM32");
-
-  } else if (op == "ADC") {
-    int channel = rest.toInt();
-    if (channel < 0 || channel > 5) { Serial1.println("ERR invalid ADC channel"); return; }
-    int val = analogRead(A0 + channel);
-    Serial1.println("OK " + String(val));
-
-  } else if (op == "INT") {
-    int sp = rest.indexOf(' ');
-    int pin = rest.substring(0, sp).toInt();
-    String mode = rest.substring(sp + 1);
-    mode.trim();
-
-    // Detach any existing slot for this pin.
-    for (int i = 0; i < MAX_INT_SLOTS; i++) {
-      if (intSlots[i].active && intSlots[i].pin == pin) {
-        detachInterrupt(digitalPinToInterrupt(pin));
-        intSlots[i].active = false;
-        break;
-      }
-    }
-
-    if (mode == "NONE") {
-      Serial1.println("OK");
-      return;
-    }
-
-    // Find a free slot.
-    int slot = -1;
-    for (int i = 0; i < MAX_INT_SLOTS; i++) {
-      if (!intSlots[i].active) { slot = i; break; }
-    }
-    if (slot < 0) {
-      Serial1.println("ERR no interrupt slots");
-      return;
-    }
-
-    PinStatus imode = CHANGE;
-    if (mode == "RISING")  imode = RISING;
-    if (mode == "FALLING") imode = FALLING;
-
-    intSlots[slot] = { pin, true, false, (bool)digitalRead(pin) };
-    attachInterrupt(digitalPinToInterrupt(pin), isrTable[slot], imode);
-    Serial1.println("OK");
-
-  } else {
-    Serial1.println("ERR unknown command: " + op);
-  }
-}
-
-// setTimerFrequency adjusts the PWM frequency for the given pin
-// using direct STM32U585 timer register access.
-// Pin-to-timer mapping: 3->TIM2_CH2, 5->TIM2_CH1, 6->TIM3_CH1,
-//                        9->TIM1_CH2, 10->TIM1_CH3, 11->TIM1_CH1
-void setTimerFrequency(int pin, int freqHz) {
-  if (freqHz <= 0) return;
-  // 80 MHz is the STM32U585 timer clock after PLL
-  const uint32_t timerClock = 80000000UL;
-  uint32_t period = timerClock / freqHz - 1;
-
-  TIM_TypeDef* tim = nullptr;
-  if (pin == 3 || pin == 5) tim = TIM2;
-  else if (pin == 6)        tim = TIM3;
-  else if (pin == 9 || pin == 10 || pin == 11) tim = TIM1;
-
-  if (tim != nullptr) {
-    tim->PSC = 0;           // no prescaler
-    tim->ARR = period;      // auto-reload sets the period
-    tim->EGR = TIM_EGR_UG; // update event to apply registers
-  }
-}
+// PWM frequency + duty are handled by the Zephyr PWM driver (pwm_set_dt) in the
+// handlers above — no direct timer-register access.

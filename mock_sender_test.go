@@ -3,36 +3,85 @@ package arduino
 import (
 	"context"
 	"fmt"
+	"sync"
 )
 
-// mockSender implements sender for testing.
-// responses is a queue of (response, error) pairs returned in order.
+type mockCall struct {
+	method string
+	args   []interface{}
+}
+
+type mockHandler func(args []interface{}) (interface{}, error)
+
+// mockSender implements sender for hardware-free tests. It records every RPC call
+// and dispatches to per-method handlers. Sensible defaults let a board construct
+// cleanly; tests override behavior via on() and inject interrupts via pushTick().
 type mockSender struct {
-	responses []mockResponse
-	sent      []string
-	closed    bool
+	mu       sync.Mutex
+	handlers map[string]mockHandler
+	calls    []mockCall
+	tickCh   chan tickEvent
+	closed   bool
 }
 
-type mockResponse struct {
-	resp string
-	err  error
-}
-
-func (m *mockSender) send(_ context.Context, cmd string) (string, error) {
-	m.sent = append(m.sent, cmd)
-	if len(m.responses) == 0 {
-		return "", fmt.Errorf("mockSender: no more responses queued")
+func newMockSender() *mockSender {
+	m := &mockSender{
+		handlers: map[string]mockHandler{},
+		tickCh:   make(chan tickEvent, 64),
 	}
-	r := m.responses[0]
-	m.responses = m.responses[1:]
-	return r.resp, r.err
+	m.on("hello", func([]interface{}) (interface{}, error) { return firmwareVersion, nil })
+	m.on("$/register", func([]interface{}) (interface{}, error) { return nil, nil })
+	m.on("gpio_set", func([]interface{}) (interface{}, error) { return true, nil })
+	m.on("gpio_get", func([]interface{}) (interface{}, error) { return false, nil })
+	m.on("adc_read", func([]interface{}) (interface{}, error) { return 0, nil })
+	m.on("pwm_set", func([]interface{}) (interface{}, error) { return true, nil })
+	m.on("pwm_freq", func([]interface{}) (interface{}, error) { return true, nil })
+	m.on("int_config", func([]interface{}) (interface{}, error) { return true, nil })
+	return m
 }
+
+func (m *mockSender) on(method string, h mockHandler) {
+	m.mu.Lock()
+	m.handlers[method] = h
+	m.mu.Unlock()
+}
+
+func (m *mockSender) call(_ context.Context, method string, args ...interface{}) (interface{}, error) {
+	m.mu.Lock()
+	m.calls = append(m.calls, mockCall{method: method, args: args})
+	h, ok := m.handlers[method]
+	m.mu.Unlock()
+	if !ok {
+		return nil, fmt.Errorf("mockSender: no handler for %q", method)
+	}
+	return h(args)
+}
+
+func (m *mockSender) ticks() <-chan tickEvent { return m.tickCh }
 
 func (m *mockSender) close() error {
+	m.mu.Lock()
 	m.closed = true
+	m.mu.Unlock()
 	return nil
 }
 
-func (m *mockSender) queue(resp string, err error) {
-	m.responses = append(m.responses, mockResponse{resp, err})
+func (m *mockSender) pushTick(ev tickEvent) { m.tickCh <- ev }
+
+// lastCall returns the most recent call to method, or (mockCall{}, false).
+func (m *mockSender) lastCall(method string) (mockCall, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for i := len(m.calls) - 1; i >= 0; i-- {
+		if m.calls[i].method == method {
+			return m.calls[i], true
+		}
+	}
+	return mockCall{}, false
+}
+
+func (m *mockSender) isClosed() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.closed
 }
