@@ -15,7 +15,7 @@ running a Zephyr-based Arduino sketch. They talk over an internal UART.
 
 ## The core constraint (read this first)
 
-You **cannot** open the STM32's serial port from Linux and speak Firmata/raw bytes.
+You **cannot** open the STM32's serial port from Linux and talk to it directly.
 Since ArduinoCore-zephyr ≥ 0.55.0, Arduino's **`arduino-router`** service owns the
 internal link (`/dev/ttyHS1`) exclusively. So the module is a **client of
 arduino-router**, speaking **MessagePack-RPC** over its Unix socket
@@ -23,8 +23,7 @@ arduino-router**, speaking **MessagePack-RPC** over its Unix socket
 (`firmware/uno-q-firmware/`) uses the `Arduino_RouterBridge` library to register
 the RPC methods the module calls. Don't try to disable arduino-router — go through it.
 
-This is why the earlier firmata-over-serial approach was abandoned. Full root-cause
-in `DESIGN.md`.
+Full root-cause in `DESIGN.md`.
 
 ## Layout
 

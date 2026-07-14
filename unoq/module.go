@@ -1,3 +1,4 @@
+// Package unoq implements the Arduino UNO Q board.
 package unoq
 
 import (

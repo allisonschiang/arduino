@@ -3,7 +3,7 @@
 ## Why arduino-router, not a raw serial port
 
 The obvious approach — open the STM32's serial port (`/dev/ttyHS1`) from the Linux
-side and speak Firmata/ASCII — does **not** work on the UNO Q. In
+side and talk to it directly — does **not** work on the UNO Q. In
 `ArduinoCore-zephyr` **0.55.0** (PR #370,
 *"zephyrSerial: provide ARDUINO_ROUTER_SERIAL from DTS"*):
 
