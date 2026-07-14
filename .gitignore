@@ -33,3 +33,6 @@ bin
 .VIAM_RELOAD_ARCHIVE.tar.gz
 reload-*/
 bin/
+
+# Compiled example/dev binaries
+/client

@@ -18,7 +18,7 @@ module: test $(MODULE_BINARY)
 test:
 	go test -race ./...
 
-# golangci-lint is pinned in CI (etc/golangci.yaml) with a version matching the
+# golangci-lint is pinned in CI (etc/.golangci.yaml) with a version matching the
 # repo's Go toolchain. Locally, `make lint` runs gofmt + vet, which always pass;
 # run `make lint-golangci` in an environment with a compatible golangci-lint.
 lint:
@@ -26,7 +26,7 @@ lint:
 	go vet ./...
 
 lint-golangci: tool-install
-	$(TOOL_BIN)/golangci-lint run --config etc/golangci.yaml
+	$(TOOL_BIN)/golangci-lint run --config etc/.golangci.yaml
 
 tool-install:
 	GOBIN=$(shell pwd)/$(TOOL_BIN) go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_VERSION)
