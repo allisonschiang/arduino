@@ -96,6 +96,18 @@ static int rpc_adc_read(int channel) {
   return analogRead(A0 + channel);
 }
 
+// rpc_dac_write drives the STM32 DAC. Only channels 0 and 1 (A0/A1) have a DAC;
+// value is 0-4095 (12-bit, 0-3.3V). Using A0/A1 as a DAC output takes over the
+// pin from its ADC input.
+static bool rpc_dac_write(int channel, int value) {
+  if (channel < 0 || channel > 1) return false;
+  if (value < 0) value = 0;
+  if (value > 4095) value = 4095;
+  analogWriteResolution(12);
+  analogWrite((dacPins)channel, value);
+  return true;
+}
+
 static bool rpc_pwm_set(int pin, float duty) {
   int i = pwmIndex(pin);
   if (i < 0) return false;
@@ -169,6 +181,7 @@ void setup() {
   Bridge.provide_safe("gpio_set",   rpc_gpio_set);
   Bridge.provide_safe("gpio_get",   rpc_gpio_get);
   Bridge.provide_safe("adc_read",   rpc_adc_read);
+  Bridge.provide_safe("dac_write",  rpc_dac_write);
   Bridge.provide_safe("pwm_set",    rpc_pwm_set);
   Bridge.provide_safe("pwm_freq",   rpc_pwm_freq);
   Bridge.provide_safe("int_config", rpc_int_config);

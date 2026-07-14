@@ -36,3 +36,4 @@ bin/
 
 # Compiled example/dev binaries
 /client
+/dac

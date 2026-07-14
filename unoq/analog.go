@@ -45,7 +45,26 @@ func (a *analogPin) Read(ctx context.Context, _ map[string]interface{}) (board.A
 	}, nil
 }
 
-// Write is not supported — A0–A5 are input-only analog pins.
-func (a *analogPin) Write(_ context.Context, _ int, _ map[string]interface{}) error {
-	return fmt.Errorf("analog write not supported on Arduino UNO Q (pins A0-A5 are input only)")
+// Write drives the STM32 DAC on this channel. Only A0 and A1 (channels 0 and 1)
+// have a DAC; value is 0–4095 (12-bit, 0–3.3V). Writing takes the pin over from
+// its ADC input, so a channel can Read or Write but not both at once.
+func (a *analogPin) Write(ctx context.Context, value int, _ map[string]interface{}) error {
+	channel, err := utils.PinToInt(a.channel)
+	if err != nil {
+		return fmt.Errorf("invalid analog channel %q: %w", a.channel, err)
+	}
+	if channel != 0 && channel != 1 {
+		return fmt.Errorf("analog write (DAC) only supported on A0 and A1 (channels 0-1), not channel %s", a.channel)
+	}
+	if value < 0 || value > int(adcMax) {
+		return fmt.Errorf("analog write value %d out of range (0-4095)", value)
+	}
+	res, err := a.serial.call(ctx, "dac_write", channel, value)
+	if err != nil {
+		return err
+	}
+	if ok, _ := utils.ToBool(res); !ok {
+		return fmt.Errorf("dac_write: firmware rejected channel %s", a.channel)
+	}
+	return nil
 }

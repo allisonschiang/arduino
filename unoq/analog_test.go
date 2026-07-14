@@ -32,9 +32,28 @@ func TestAnalogPinReadMax(t *testing.T) {
 	test.That(t, val.Value, test.ShouldEqual, 4095)
 }
 
-func TestAnalogPinWriteNotSupported(t *testing.T) {
+func TestAnalogPinWriteDAC(t *testing.T) {
+	mock := newMockSender()
+	mock.on("dac_write", func([]interface{}) (interface{}, error) { return true, nil })
+	pin := &analogPin{channel: "0", serial: mock}
+
+	err := pin.Write(context.Background(), 2048, nil)
+	test.That(t, err, test.ShouldBeNil)
+
+	c, ok := mock.lastCall("dac_write")
+	test.That(t, ok, test.ShouldBeTrue)
+	test.That(t, c.args, test.ShouldResemble, []interface{}{0, 2048})
+}
+
+func TestAnalogPinWriteNonDACChannel(t *testing.T) {
+	// A2 (channel 2) has no DAC — write must be rejected before any RPC call.
+	pin := &analogPin{channel: "2", serial: newMockSender()}
+	test.That(t, pin.Write(context.Background(), 2048, nil), test.ShouldNotBeNil)
+}
+
+func TestAnalogPinWriteOutOfRange(t *testing.T) {
 	pin := &analogPin{channel: "0", serial: newMockSender()}
-	test.That(t, pin.Write(context.Background(), 0, nil), test.ShouldNotBeNil)
+	test.That(t, pin.Write(context.Background(), 5000, nil), test.ShouldNotBeNil)
 }
 
 func TestAnalogPinReadFirmwareReject(t *testing.T) {

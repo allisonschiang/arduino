@@ -72,8 +72,9 @@ viam-server ── gRPC ──> module (cmd/module) ── msgpack-RPC over unix
 - **`resource.AlwaysRebuild`.** Any config change tears down and rebuilds; the
   router connection reopens from scratch, so a clean rebuild beats in-place reconfigure.
 - **PWM read-back is cached module-side** — the STM32 can't report duty/freq back.
-- **`SetPowerMode` / `DoCommand` return `UnimplementedError`; `Analog.Write` errors**
-  (A0–A5 are input-only). These are intentional, not stubs to fill.
+- **`SetPowerMode` / `DoCommand` return `UnimplementedError`** — intentional (no
+  Viam power-mode mapping on a two-chip board; no custom commands). `Analog.Write`
+  drives the STM32 DAC on A0/A1 only (channels 0/1); A2–A5 have no DAC and reject.
 
 ## Hardware gotchas (hard-won — don't rediscover these)
 

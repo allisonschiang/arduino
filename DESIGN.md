@@ -64,6 +64,7 @@ Request/response methods the sketch registers via `Bridge.provide` / `provide_sa
 | `pwm_set`    | `pin int, duty float`    | `bool`         | PWM pins (2,3,5,6,7,8,9,10,11,12,13,20,21) via `pwm_set_dt` |
 | `pwm_freq`   | `pin int, hz int`        | `bool`         | period via `pwm_set_dt`; range bounded per-timer (see below) |
 | `adc_read`   | `channel int (0-5)`      | `int (0-4095)` | 12-bit ADC |
+| `dac_write`  | `channel int (0-1), value int (0-4095)` | `bool` | 12-bit DAC on A0/A1 only |
 | `int_config` | `pin int, mode string`   | –              | RISING/FALLING/CHANGE/NONE |
 
 Notification the sketch pushes via `Bridge.notify`:

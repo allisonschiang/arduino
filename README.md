@@ -113,6 +113,15 @@ reader = await board.analog_by_name("joystick_x")
 reading = await reader.read()   # reading.value in 0..4095
 ```
 
+### Analog output (DAC)
+`Analog.write()` drives a real analog voltage (the STM32 DAC), **only on A0 and A1**
+(channels 0 and 1), value 0–4095 (12-bit, 0–3.3 V). A channel drives *or* reads —
+using A0/A1 as a DAC takes the pin over from its ADC input.
+```python
+dac = await board.analog_by_name("a0")   # a0 configured on pin "0"
+await dac.write(2048)                     # ~1.65 V out
+```
+
 ### Digital interrupts
 Declared in `digital_interrupts`. `Value()` returns the cumulative tick count;
 `StreamTicks` streams edges.
@@ -125,7 +134,7 @@ count = await di.value()
 
 | Feature | Status |
 |---------|--------|
-| Analog write | A0–A5 are input-only |
+| Analog write on A2–A5 | only A0/A1 have a DAC |
 | `SetPowerMode` | not supported (returns unimplemented) |
 | `pwm()` / `pwm_freq()` hardware read-back | cached module-side instead |
 
