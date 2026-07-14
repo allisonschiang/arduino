@@ -1,18 +1,14 @@
 #!/bin/bash
-# setup.sh — first-run setup for viam:arduino:uno-q on the Arduino UNO Q.
-# Viam runs this once when the module is installed.
+# setup.sh — first-run setup for viam:arduino:uno-q, run once by Viam on install.
 #
-# The module talks to the STM32 through the arduino-router MessagePack-RPC bridge,
-# NOT a raw serial port. Arduino removed raw-serial access to the Linux side in
-# ArduinoCore-zephyr >= 0.55.0 (see DESIGN.md). So this script:
-#   1. Ensures arduino-router is running + enabled — the module is a CLIENT of it.
-#      (The old module disabled the router; that was for the dead raw-serial path.)
-#   2. Best-effort installs arduino-cli + the arduino:zephyr core + the
-#      Arduino_RouterBridge library, and flashes the RouterBridge sketch.
+# The module talks to the STM32 through the arduino-router bridge, so this script:
+#   1. Ensures arduino-router is running + enabled (the module is a client of it).
+#   2. Best-effort flashes the RouterBridge firmware sketch via arduino-cli
+#      (installing the arduino:zephyr core + Arduino_RouterBridge library first).
 #
-# ASSUMPTION: on-device flashing via arduino-cli works and the sketch registers
-# its RPC methods on boot. Firmware may instead be flashed via Arduino App Lab;
-# if so, the flash steps below are a harmless fallback. See DESIGN.md.
+# Flashing is best-effort: if arduino-cli is missing or a step fails, the script
+# still exits 0 and the firmware can be flashed by hand — see the README section
+# "Flashing the firmware" for the Arduino App Lab fallback.
 
 set -uo pipefail  # deliberately not -e: setup is best-effort, must never brick install
 

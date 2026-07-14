@@ -37,12 +37,42 @@ edges.
 ## Requirements
 
 - **Hardware:** Arduino UNO Q.
-- **Firmware:** `firmware/uno-q-firmware/uno-q-firmware.ino`, built against the
-  `arduino:zephyr` core with the **Arduino_RouterBridge** library, flashed to the
-  STM32. `setup.sh` attempts this automatically on first install; you can also
-  flash it via Arduino App Lab / `arduino-cli`.
+- **Firmware:** the RouterBridge sketch must be on the STM32 — see
+  [Flashing the firmware](#flashing-the-firmware) below.
 - **`arduino-router` service:** must be **running** (the default on the UNO Q).
   The module talks through it, so don't disable it.
+
+## Flashing the firmware
+
+The board's STM32 coprocessor must run the RouterBridge sketch
+(`firmware/uno-q-firmware/uno-q-firmware.ino`) for the module to work.
+
+**Automatic (default).** On first install Viam runs `setup.sh`, which best-effort
+flashes the sketch with `arduino-cli` (installing the `arduino:zephyr` core and the
+`Arduino_RouterBridge` library first). If it succeeds you don't need to do anything.
+
+**Manual fallback (if auto-flash fails).** `setup.sh` is best-effort — if
+`arduino-cli` isn't available or a step fails, flash it yourself. The sketch ships
+inside the module package at `firmware/uno-q-firmware/uno-q-firmware.ino`.
+
+*Option A — Arduino App Lab (easiest):*
+1. Open **Arduino App Lab** on the UNO Q (or connect the board over USB-C).
+2. Create/open a sketch and paste in the contents of `uno-q-firmware.ino`, or open
+   the file directly.
+3. Add the **Arduino_RouterBridge** library (Library Manager) if prompted.
+4. Select the **Arduino UNO Q** board and click **Upload**.
+
+*Option B — `arduino-cli` (on the board's Linux side):*
+```bash
+arduino-cli lib install Arduino_RouterBridge
+arduino-cli compile --fqbn=arduino:zephyr:unoq firmware/uno-q-firmware
+arduino-cli upload  --fqbn=arduino:zephyr:unoq firmware/uno-q-firmware
+```
+A "verify failed" warning on the second flash bank is a benign quirk of this
+dual-bank STM32 — the upload still succeeds.
+
+Confirmed flashed when the module connects without a handshake timeout (the
+firmware answers the `hello` RPC with its version string).
 
 ## Configure your UNO Q board
 
