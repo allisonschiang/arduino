@@ -4,7 +4,7 @@ MODULE_BINARY = $(BIN_OUTPUT_PATH)/arduino
 GOLANGCI_VERSION = v1.61.0
 
 # Static build so the module binary runs on any glibc/musl UNO Q image.
-$(MODULE_BINARY): Makefile go.mod *.go cmd/module/*.go
+$(MODULE_BINARY): Makefile go.mod unoq/*.go utils/*.go cmd/module/*.go
 	GOOS=$(VIAM_BUILD_OS) GOARCH=$(VIAM_BUILD_ARCH) go build \
 		-tags no_cgo,osusergo,netgo \
 		-ldflags="-extldflags=-static -s -w" \

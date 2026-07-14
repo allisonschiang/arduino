@@ -1,6 +1,7 @@
-package arduino
+package unoq
 
 import (
+	"arduino/utils"
 	"context"
 	"fmt"
 	"net"
@@ -105,7 +106,7 @@ func (c *rpcClient) readLoop() {
 		if len(msg) == 0 {
 			continue
 		}
-		typ, ok := toInt(msg[0])
+		typ, ok := utils.ToInt(msg[0])
 		if !ok {
 			continue
 		}
@@ -114,7 +115,7 @@ func (c *rpcClient) readLoop() {
 			if len(msg) < 4 {
 				continue
 			}
-			id, ok := toUint32(msg[1])
+			id, ok := utils.ToUint32(msg[1])
 			if !ok {
 				continue
 			}
@@ -179,9 +180,9 @@ func (c *rpcClient) handleTick(params interface{}) {
 	if !ok || len(arr) < 3 {
 		return
 	}
-	pin, _ := toInt(arr[0])
-	high, _ := toInt(arr[1])
-	micros, _ := toUint64(arr[2])
+	pin, _ := utils.ToInt(arr[0])
+	high, _ := utils.ToInt(arr[1])
+	micros, _ := utils.ToUint64(arr[2])
 	ev := tickEvent{pin: pin, high: high != 0, micros: micros}
 	select {
 	case c.tickCh <- ev:
@@ -237,76 +238,4 @@ func (c *rpcClient) ticks() <-chan tickEvent {
 func (c *rpcClient) close() error {
 	c.closeOnce.Do(func() { close(c.done) })
 	return c.conn.Close()
-}
-
-// ---- msgpack value coercion helpers ----
-// vmihailenco/msgpack decodes untyped arrays into []interface{} with numeric
-// elements as int64/uint64/float64 depending on the wire type; these normalize.
-
-func toInt(v interface{}) (int, bool) {
-	switch n := v.(type) {
-	case int:
-		return n, true
-	case int8:
-		return int(n), true
-	case int16:
-		return int(n), true
-	case int32:
-		return int(n), true
-	case int64:
-		return int(n), true
-	case uint:
-		return int(n), true
-	case uint8:
-		return int(n), true
-	case uint16:
-		return int(n), true
-	case uint32:
-		return int(n), true
-	case uint64:
-		return int(n), true
-	case float32:
-		return int(n), true
-	case float64:
-		return int(n), true
-	}
-	return 0, false
-}
-
-func toUint32(v interface{}) (uint32, bool) {
-	if n, ok := toInt(v); ok {
-		return uint32(n), true
-	}
-	return 0, false
-}
-
-func toUint64(v interface{}) (uint64, bool) {
-	switch n := v.(type) {
-	case uint64:
-		return n, true
-	case int64:
-		return uint64(n), true
-	default:
-		if i, ok := toInt(v); ok {
-			return uint64(i), true
-		}
-	}
-	return 0, false
-}
-
-func toBool(v interface{}) (bool, bool) {
-	switch b := v.(type) {
-	case bool:
-		return b, true
-	default:
-		if i, ok := toInt(v); ok {
-			return i != 0, true
-		}
-	}
-	return false, false
-}
-
-func toString(v interface{}) (string, bool) {
-	s, ok := v.(string)
-	return s, ok
 }

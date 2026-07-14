@@ -1,6 +1,7 @@
-package arduino
+package unoq
 
 import (
+	"arduino/utils"
 	"context"
 	"net"
 	"testing"
@@ -25,7 +26,7 @@ func TestRPCClientCall(t *testing.T) {
 			return
 		}
 		// req = [0, id, method, params]
-		id, _ := toUint32(req[1])
+		id, _ := utils.ToUint32(req[1])
 		_ = enc.Encode([]interface{}{msgResponse, id, nil, "UNO-Q v2"})
 	}()
 
@@ -33,7 +34,7 @@ func TestRPCClientCall(t *testing.T) {
 	defer cancel()
 	res, err := c.call(ctx, "hello")
 	test.That(t, err, test.ShouldBeNil)
-	s, _ := toString(res)
+	s, _ := utils.ToString(res)
 	test.That(t, s, test.ShouldEqual, "UNO-Q v2")
 }
 
@@ -49,7 +50,7 @@ func TestRPCClientCallError(t *testing.T) {
 		if err := dec.Decode(&req); err != nil {
 			return
 		}
-		id, _ := toUint32(req[1])
+		id, _ := utils.ToUint32(req[1])
 		_ = enc.Encode([]interface{}{msgResponse, id, "bad pin", nil})
 	}()
 
@@ -87,27 +88,4 @@ func TestRPCClientCallAfterClose(t *testing.T) {
 
 	_, err := c.call(context.Background(), "hello")
 	test.That(t, err, test.ShouldNotBeNil)
-}
-
-func TestCoercionHelpers(t *testing.T) {
-	i, ok := toInt(int64(42))
-	test.That(t, ok, test.ShouldBeTrue)
-	test.That(t, i, test.ShouldEqual, 42)
-
-	b, ok := toBool(true)
-	test.That(t, ok, test.ShouldBeTrue)
-	test.That(t, b, test.ShouldBeTrue)
-
-	// numeric-as-bool
-	b2, ok := toBool(int64(1))
-	test.That(t, ok, test.ShouldBeTrue)
-	test.That(t, b2, test.ShouldBeTrue)
-
-	u, ok := toUint64(uint64(9000))
-	test.That(t, ok, test.ShouldBeTrue)
-	test.That(t, u, test.ShouldEqual, uint64(9000))
-
-	s, ok := toString("hi")
-	test.That(t, ok, test.ShouldBeTrue)
-	test.That(t, s, test.ShouldEqual, "hi")
 }

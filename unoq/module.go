@@ -1,6 +1,7 @@
-package arduino
+package unoq
 
 import (
+	"arduino/utils"
 	"context"
 	"errors"
 	"fmt"
@@ -204,7 +205,7 @@ func (b *arduinoUnoQ) hello(ctx context.Context) error {
 		attemptCancel()
 
 		if err == nil {
-			got, _ := toString(res)
+			got, _ := utils.ToString(res)
 			if got != firmwareVersion {
 				return fmt.Errorf("firmware version mismatch: got %q, want %q", got, firmwareVersion)
 			}
@@ -237,7 +238,7 @@ func (b *arduinoUnoQ) AnalogByName(name string) (board.Analog, error) {
 // digitalInterrupt keyed by logical name.
 func (b *arduinoUnoQ) configureInterrupts(cfgs []InterruptConfig) error {
 	for _, ic := range cfgs {
-		pin, err := pinToInt(ic.Pin)
+		pin, err := utils.PinToInt(ic.Pin)
 		if err != nil {
 			return fmt.Errorf("interrupt %q: %w", ic.Name, err)
 		}
@@ -247,7 +248,7 @@ func (b *arduinoUnoQ) configureInterrupts(cfgs []InterruptConfig) error {
 		if err != nil {
 			return fmt.Errorf("configuring interrupt %q on pin %s: %w", ic.Name, ic.Pin, err)
 		}
-		if ok, _ := toBool(res); !ok {
+		if ok, _ := utils.ToBool(res); !ok {
 			return fmt.Errorf("configuring interrupt %q on pin %s: firmware rejected mode %q", ic.Name, ic.Pin, ic.Mode)
 		}
 		b.interrupts[ic.Name] = &digitalInterrupt{name: ic.Name, pin: ic.Pin}

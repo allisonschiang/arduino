@@ -1,4 +1,4 @@
-package arduino
+package unoq
 
 import (
 	"sync"

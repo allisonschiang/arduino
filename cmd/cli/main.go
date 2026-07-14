@@ -18,7 +18,7 @@ import (
 	"log"
 	"time"
 
-	"arduino"
+	"arduino/unoq"
 	board "go.viam.com/rdk/components/board"
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/resource"
@@ -32,15 +32,15 @@ func main() {
 	ctx := context.Background()
 	logger := logging.NewLogger("cli")
 
-	cfg := arduino.Config{
+	cfg := unoq.Config{
 		RouterSocket:  *socket,
-		AnalogReaders: []arduino.AnalogConfig{{Name: "a0", Pin: "0"}},
-		DigitalInterrupts: []arduino.InterruptConfig{
+		AnalogReaders: []unoq.AnalogConfig{{Name: "a0", Pin: "0"}},
+		DigitalInterrupts: []unoq.InterruptConfig{
 			{Name: "int2", Pin: "2", Mode: "CHANGE"},
 		},
 	}
 
-	b, err := arduino.NewUnoQ(ctx, resource.Dependencies{}, board.Named("board"), &cfg, logger)
+	b, err := unoq.NewUnoQ(ctx, resource.Dependencies{}, board.Named("board"), &cfg, logger)
 	if err != nil {
 		log.Fatalf("connect: %v", err)
 	}

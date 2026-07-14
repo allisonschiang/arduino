@@ -1,6 +1,7 @@
-package arduino
+package unoq
 
 import (
+	"arduino/utils"
 	"context"
 	"fmt"
 
@@ -21,7 +22,7 @@ type analogPin struct {
 
 // Read calls adc_read and converts the raw 12-bit result to AnalogValue.
 func (a *analogPin) Read(ctx context.Context, _ map[string]interface{}) (board.AnalogValue, error) {
-	channel, err := pinToInt(a.channel)
+	channel, err := utils.PinToInt(a.channel)
 	if err != nil {
 		return board.AnalogValue{}, fmt.Errorf("invalid analog channel %q: %w", a.channel, err)
 	}
@@ -29,7 +30,7 @@ func (a *analogPin) Read(ctx context.Context, _ map[string]interface{}) (board.A
 	if err != nil {
 		return board.AnalogValue{}, err
 	}
-	value, ok := toInt(res)
+	value, ok := utils.ToInt(res)
 	if !ok {
 		return board.AnalogValue{}, fmt.Errorf("adc_read: unexpected result %v", res)
 	}

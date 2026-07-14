@@ -1,9 +1,9 @@
-package arduino
+package unoq
 
 import (
+	"arduino/utils"
 	"context"
 	"fmt"
-	"strconv"
 	"sync"
 )
 
@@ -28,17 +28,9 @@ type gpioPin struct {
 	freq uint
 }
 
-func pinToInt(pin string) (int, error) {
-	n, err := strconv.Atoi(pin)
-	if err != nil {
-		return 0, fmt.Errorf("invalid pin %q: not a number", pin)
-	}
-	return n, nil
-}
-
 // Get returns the current high/low state of the pin.
 func (p *gpioPin) Get(ctx context.Context, _ map[string]interface{}) (bool, error) {
-	pin, err := pinToInt(p.pinNum)
+	pin, err := utils.PinToInt(p.pinNum)
 	if err != nil {
 		return false, err
 	}
@@ -46,7 +38,7 @@ func (p *gpioPin) Get(ctx context.Context, _ map[string]interface{}) (bool, erro
 	if err != nil {
 		return false, err
 	}
-	val, ok := toBool(res)
+	val, ok := utils.ToBool(res)
 	if !ok {
 		return false, fmt.Errorf("gpio_get: unexpected result %v", res)
 	}
@@ -55,7 +47,7 @@ func (p *gpioPin) Get(ctx context.Context, _ map[string]interface{}) (bool, erro
 
 // Set drives the pin high or low.
 func (p *gpioPin) Set(ctx context.Context, high bool, _ map[string]interface{}) error {
-	pin, err := pinToInt(p.pinNum)
+	pin, err := utils.PinToInt(p.pinNum)
 	if err != nil {
 		return err
 	}
@@ -78,7 +70,7 @@ func (p *gpioPin) SetPWM(ctx context.Context, dutyCyclePct float64, _ map[string
 	if !pwmPins[p.pinNum] {
 		return fmt.Errorf("pin %s does not support PWM", p.pinNum)
 	}
-	pin, err := pinToInt(p.pinNum)
+	pin, err := utils.PinToInt(p.pinNum)
 	if err != nil {
 		return err
 	}
@@ -86,7 +78,7 @@ func (p *gpioPin) SetPWM(ctx context.Context, dutyCyclePct float64, _ map[string
 	if err != nil {
 		return err
 	}
-	if ok, _ := toBool(res); !ok {
+	if ok, _ := utils.ToBool(res); !ok {
 		return fmt.Errorf("firmware rejected pwm_set on pin %s", p.pinNum)
 	}
 	p.mu.Lock()
@@ -110,7 +102,7 @@ func (p *gpioPin) SetPWMFreq(ctx context.Context, freqHz uint, _ map[string]inte
 	if !pwmPins[p.pinNum] {
 		return fmt.Errorf("pin %s does not support PWM", p.pinNum)
 	}
-	pin, err := pinToInt(p.pinNum)
+	pin, err := utils.PinToInt(p.pinNum)
 	if err != nil {
 		return err
 	}
@@ -118,7 +110,7 @@ func (p *gpioPin) SetPWMFreq(ctx context.Context, freqHz uint, _ map[string]inte
 	if err != nil {
 		return err
 	}
-	if ok, _ := toBool(res); !ok {
+	if ok, _ := utils.ToBool(res); !ok {
 		return fmt.Errorf("firmware rejected pwm_freq on pin %s", p.pinNum)
 	}
 	p.mu.Lock()

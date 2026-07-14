@@ -1,7 +1,7 @@
 package main
 
 import (
-	"arduino"
+	"arduino/unoq"
 	board "go.viam.com/rdk/components/board"
 	"go.viam.com/rdk/module"
 	"go.viam.com/rdk/resource"
@@ -9,5 +9,5 @@ import (
 
 func main() {
 	// ModularMain can take multiple APIModel arguments, if your module implements multiple models.
-	module.ModularMain(resource.APIModel{API: board.API, Model: arduino.UnoQ})
+	module.ModularMain(resource.APIModel{API: board.API, Model: unoq.UnoQ})
 }
