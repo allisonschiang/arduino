@@ -6,7 +6,7 @@ implements the [`rdk:component:board`](https://docs.viam.com/components/board/) 
 
 The module runs on the UNO Q's **Qualcomm Linux SoC** and talks to the onboard
 **STM32U585** coprocessor through Arduino's **`arduino-router`** service using
-MessagePack-RPC. See [DESIGN.md](DESIGN.md) for why this is the supported path on
+MessagePack-RPC. See [CLAUDE.md](CLAUDE.md) for why this is the supported path on
 the UNO Q.
 
 ## Architecture
@@ -177,5 +177,5 @@ make module           # static build + bin/module.tar.gz
 ```
 
 The transport is behind the `sender` interface (`rpc.go`); tests inject a mock,
-so the full board logic is verified without hardware. See [DESIGN.md](DESIGN.md)
+so the full board logic is verified without hardware. See [CLAUDE.md](CLAUDE.md)
 for the architecture and the RPC method contract.
